@@ -1,3 +1,4 @@
+﻿import tkinter as tk
 from tkinter import ttk, simpledialog, filedialog, colorchooser, scrolledtext
 import pyautogui
 import time
