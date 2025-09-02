@@ -1,4 +1,3 @@
-import tkinter as tk
 from tkinter import ttk, simpledialog, filedialog, colorchooser, scrolledtext
 import pyautogui
 import time
@@ -8,6 +7,12 @@ import os
 import random
 import shutil
 from PIL import Image, ImageTk, ImageGrab # Pillow for pixel color and image ops
+import platform
+import logging
+from logging.handlers import RotatingFileHandler
+import uuid
+import queue
+import math
 
 # --- Global Variables & Constants ---
 DEFAULT_PROJECT_NAME = "UntitledSequence"
@@ -87,6 +92,12 @@ class DesktopAutomationApp:
         x, y = get_screen_center_for_window(550, 700, root)
         self.root.geometry(f"+{x}+{y}")
 
+        # Theme state and menu
+        self._theme_mode = 'dark'  # default preference
+        self._setup_logging()
+        self._apply_system_theme()
+        self._setup_menubar()
+
         self.objects = {}
         self.current_steps = []
         self.current_project_path = None
@@ -95,8 +106,10 @@ class DesktopAutomationApp:
         self.sequence_modified = False
 
         self.grid_window = None
-        self.grid_rows_var = tk.IntVar(value=10)
-        self.grid_cols_var = tk.IntVar(value=10)
+        # Baseline cell size ~50x50px => rows/cols from screen size
+        _sw, _sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        self.grid_rows_var = tk.IntVar(value=50)
+        self.grid_cols_var = tk.IntVar(value=50)
         self.selected_grid_cells = []
 
         self.drag_select_window = None
@@ -109,8 +122,13 @@ class DesktopAutomationApp:
 
         self.container = tk.Frame(root)
         self.container.pack(fill="both", expand=True)
+        # Make the grid inside container expand with the window
+        self.container.grid_rowconfigure(0, weight=1)
+        self.container.grid_columnconfigure(0, weight=1)
 
         self.frames = {}
+        # Track any extra ObjectCreationFrame instances opened in new windows
+        self._aux_object_frames = []
         for F in (MainFrame, ObjectCreationFrame, StepCreatorFrame, InstructionsFrame):
             page_name = F.__name__
             frame = F(parent=self.container, controller=self)
@@ -118,6 +136,331 @@ class DesktopAutomationApp:
             frame.grid(row=0, column=0, sticky="nsew")
 
         self.show_frame("MainFrame")
+
+    def _refresh_all_object_views(self):
+        try:
+            oc = self.frames.get("ObjectCreationFrame")
+            if oc and oc.winfo_exists():
+                oc.update_objects_display()
+            for fr in list(self._aux_object_frames):
+                try:
+                    if fr and fr.winfo_exists():
+                        fr.update_objects_display()
+                except Exception:
+                    pass
+        except Exception:
+            if hasattr(self, 'logger'):
+                self.logger.exception('Refresh object views failed')
+
+
+    # --- Logging & Toasts ---
+    def _setup_logging(self):
+        try:
+            logs_dir = os.path.join(os.getcwd(), 'logs')
+            os.makedirs(logs_dir, exist_ok=True)
+            self.logger = logging.getLogger('automation_maker')
+            self.logger.setLevel(logging.INFO)
+            handler = RotatingFileHandler(os.path.join(logs_dir, 'automation.log'), maxBytes=1_000_000, backupCount=5)
+            fmt = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+            handler.setFormatter(fmt)
+            if not any(isinstance(h, RotatingFileHandler) for h in self.logger.handlers):
+                self.logger.addHandler(handler)
+        except Exception as e:
+            print('Logging setup failed:', e)
+
+    def show_toast(self, message, duration_ms=3500):
+        try:
+            tw = tk.Toplevel(self.root)
+            tw.wm_overrideredirect(True)
+            tw.attributes('-topmost', True)
+            pad = 8
+            bg = '#333333'; fg = '#ffffff'
+            fr = tk.Frame(tw, bg=bg)
+            fr.pack(fill='both', expand=True)
+            tk.Label(fr, text=message, bg=bg, fg=fg, padx=pad, pady=pad).pack()
+            self.root.update_idletasks()
+            # bottom-right corner
+            x = self.root.winfo_x() + self.root.winfo_width() - 320
+            y = self.root.winfo_y() + self.root.winfo_height() - 80
+            tw.geometry(f"300x50+{max(0,x)}+{max(0,y)}")
+            tw.after(duration_ms, tw.destroy)
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.exception('Toast failed: %s', e)
+
+    def _setup_menubar(self):
+        menu = tk.Menu(self.root)
+        theme_menu = tk.Menu(menu, tearoff=0)
+        theme_menu.add_command(label="Light", command=lambda: self.set_theme_mode('light'))
+        theme_menu.add_command(label="Dark", command=lambda: self.set_theme_mode('dark'))
+        theme_menu.add_command(label="Follow System", command=lambda: self.set_theme_mode('system'))
+        menu.add_cascade(label="Theme", menu=theme_menu)
+
+        window_menu = tk.Menu(menu, tearoff=0)
+        window_menu.add_command(label="Open Object Creation (Window)", command=self.open_object_creation_window)
+        window_menu.add_command(label="Open Step Creator (Window)", command=self.open_step_creator_window)
+        window_menu.add_command(label="Open Sequence Looper (Window)", command=self.open_sequence_looper_window)
+        menu.add_cascade(label="Window", menu=window_menu)
+        self.root.config(menu=menu)
+
+    def open_object_creation_window(self):
+        try:
+            win = tk.Toplevel(self.root)
+            win.title("Object Creation")
+            frame = ObjectCreationFrame(parent=win, controller=self)
+            frame.pack(fill="both", expand=True)
+            # Ensure newly opened window shows current objects
+            self._aux_object_frames.append(frame)
+            def _on_destroy(_e=None, fr=frame):
+                try:
+                    if fr in self._aux_object_frames:
+                        self._aux_object_frames.remove(fr)
+                except Exception:
+                    pass
+            win.bind('<Destroy>', _on_destroy)
+            try:
+                frame.update_objects_display()
+            except Exception:
+                pass
+            win.lift(); win.focus_force()
+        except Exception as e:
+            code = str(uuid.uuid4())[:8]
+            self.logger.exception("Object window error %s", code)
+            self.show_toast(f"Error opening Object window (code {code})")
+
+    def open_step_creator_window(self):
+        try:
+            win = tk.Toplevel(self.root)
+            win.title("Step Creator")
+            frame = StepCreatorFrame(parent=win, controller=self)
+            frame.pack(fill="both", expand=True)
+            try:
+                frame.clear_and_rebuild_steps(self.current_steps)
+            except Exception:
+                pass
+            win.lift(); win.focus_force()
+        except Exception as e:
+            code = str(uuid.uuid4())[:8]
+            self.logger.exception("Step window error %s", code)
+            self.show_toast(f"Error opening Step window (code {code})")
+
+    def open_sequence_looper_window(self):
+        win = tk.Toplevel(self.root)
+        win.title("Sequence Looper")
+        frm = ttk.Frame(win); frm.pack(fill="both", expand=True, padx=10, pady=10)
+
+        cols = ("Name", "Path")
+        tree = ttk.Treeview(frm, columns=cols, show='headings', height=8)
+        for c in cols: tree.heading(c, text=c)
+        tree.column("Name", width=220); tree.column("Path", width=420)
+        tree.pack(fill="both", expand=True)
+
+        btns = ttk.Frame(frm); btns.pack(fill="x", pady=6)
+        def add_seq():
+            path = filedialog.askopenfilename(title="Add Sequence File",defaultextension=".json",filetypes=[("JSON files","*.json"),("All files","*.*")],parent=win)
+            if not path: return
+            name = os.path.splitext(os.path.basename(path))[0]
+            tree.insert('', 'end', values=(name, path))
+        def remove_sel():
+            for i in tree.selection(): tree.delete(i)
+        # placeholder removed
+        def move_up():
+            sel = tree.selection()
+            for iid in sel:
+                prev = tree.prev(iid)
+                if prev:
+                    tree.move(iid, tree.parent(iid), tree.index(prev))
+        def move_down():
+            sel = list(tree.selection())[::-1]
+            for iid in sel:
+                nxt = tree.next(iid)
+                if nxt:
+                    tree.move(iid, tree.parent(iid), tree.index(nxt)+1)
+        ttk.Button(btns, text="Add", command=add_seq).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btns, text="Remove", command=remove_sel).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btns, text="Up", command=move_up).pack(side=tk.LEFT, padx=3)
+        ttk.Button(btns, text="Down", command=move_down).pack(side=tk.LEFT, padx=3)
+
+        controls = ttk.Frame(frm); controls.pack(fill="x", pady=6)
+        loop_forever = tk.BooleanVar(value=True)
+        cycles_var = tk.IntVar(value=1)
+        ttk.Checkbutton(controls, text="Loop forever", variable=loop_forever).pack(side=tk.LEFT)
+        ttk.Label(controls, text="Cycles:").pack(side=tk.LEFT, padx=(10,2))
+        cycles_spin = ttk.Spinbox(controls, from_=1, to=9999, textvariable=cycles_var, width=6)
+        cycles_spin.pack(side=tk.LEFT)
+        status_var = tk.StringVar(value="Idle")
+        ttk.Label(controls, textvariable=status_var).pack(side=tk.RIGHT)
+
+        stop_flag = {"stop": False}
+        def start_loop():
+            items = tree.get_children('')
+            if not items: return
+            stop_flag["stop"] = False
+            total_cycles = 999999999 if loop_forever.get() else max(1, int(cycles_var.get() or 1))
+            status_var.set("Running...")
+            for cycle in range(total_cycles):
+                if stop_flag["stop"]: break
+                for iid in tree.get_children(''):
+                    if stop_flag["stop"]: break
+                    name, path = tree.item(iid, 'values')
+                    status_var.set(f"Running: {name}")
+                    win.update_idletasks()
+                    try:
+                        self._run_sequence_file_once(path)
+                    except Exception as e:
+                        print(f"Looper error for {path}: {e}")
+            status_var.set("Stopped" if stop_flag["stop"] else "Finished")
+
+        def stop_loop():
+            stop_flag["stop"] = True
+
+        actions = ttk.Frame(frm); actions.pack(fill="x", pady=6)
+        ttk.Button(actions, text="Start", command=start_loop).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions, text="Stop", command=stop_loop).pack(side=tk.LEFT, padx=5)
+
+    def _run_sequence_file_once(self, filepath):
+        # Save current state
+        prev = {
+            'objects': self.objects.copy(),
+            'steps': list(self.current_steps),
+            'project_path': self.current_project_path,
+            'sequence_name': self.current_sequence_name,
+            'loop_count': self.loop_count.get(),
+        }
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            self.current_project_path = os.path.dirname(filepath)
+            self.current_sequence_name = data.get("sequence_name", os.path.splitext(os.path.basename(filepath))[0])
+            # Rebuild objects resolving image paths
+            new_objects = {}
+            for obj_name, obj in data.get("objects", {}).items():
+                o = obj.copy()
+                if o.get("type") == "image" and o.get("image_path"):
+                    rel = o["image_path"]
+                    abs_p = os.path.join(self.current_project_path, rel)
+                    if os.path.exists(abs_p): o["image_path"] = abs_p
+                new_objects[obj_name] = o
+            self.objects = new_objects
+            self.current_steps = data.get("steps", [])
+            self.loop_count.set(data.get("loop_count", 1))
+            # Refresh UI and run
+            self.frames["ObjectCreationFrame"].update_objects_display()
+            self.frames["StepCreatorFrame"].clear_and_rebuild_steps(self.current_steps)
+            self.run_sequence()
+        finally:
+            # Restore previous state
+            self.objects = prev['objects']
+            self.current_steps = prev['steps']
+            self.current_project_path = prev['project_path']
+            self.current_sequence_name = prev['sequence_name']
+            self.loop_count.set(prev['loop_count'])
+            self.frames["ObjectCreationFrame"].update_objects_display()
+            self.frames["StepCreatorFrame"].clear_and_rebuild_steps(self.current_steps)
+
+    def set_theme_mode(self, mode):
+        self._theme_mode = mode
+        self._apply_system_theme()
+        # Update backgrounds that were hard-coded/derived
+        for f in self.frames.values():
+            try:
+                if hasattr(f, 'refresh_content'):
+                    f.refresh_content()
+            except Exception:
+                pass
+
+    def _apply_system_theme(self):
+        """Apply theme based on preference: 'light', 'dark', or 'system'.
+        If sv_ttk is installed, use it for modern light/dark. Otherwise fall
+        back to ttk themes and basic color adjustments.
+        """
+        try:
+            style = ttk.Style(self.root)
+            current_os = platform.system()
+            available = set(style.theme_names())
+            # Determine desired mode
+            desired = self._theme_mode
+            if desired == 'system':
+                # Infer system preference on Windows; assume light elsewhere
+                prefers_dark = False
+                if current_os == 'Windows':
+                    try:
+                        import winreg  # type: ignore
+                        key = winreg.OpenKey(
+                            winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+                        )
+                        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+                        prefers_dark = (int(value) == 0)
+                    except Exception:
+                        prefers_dark = False
+                desired = 'dark' if prefers_dark else 'light'
+
+            # If sv_ttk is available, use it
+            try:
+                import sv_ttk  # type: ignore
+                if desired == 'dark': sv_ttk.set_theme('dark')
+                else: sv_ttk.set_theme('light')
+                return
+            except Exception:
+                pass
+
+            # Fallback to builtin ttk themes
+            if desired == 'dark':
+                # Prefer 'clam' for reliable color overrides in dark mode
+                base_candidates = ('clam', 'alt', 'default', 'vista', 'xpnative', 'winnative')
+            else:
+                if current_os == 'Windows':
+                    base_candidates = ('vista', 'xpnative', 'winnative', 'clam', 'default')
+                elif current_os == 'Darwin':
+                    base_candidates = ('aqua', 'clam', 'default', 'alt')
+                else:
+                    base_candidates = ('clam', 'alt', 'default')
+            for theme in base_candidates:
+                if theme in available:
+                    style.theme_use(theme)
+                    break
+
+            # Light/dark tweaks for ttk widgets if no sv_ttk
+            if desired == 'dark':
+                bg = '#2b2b2b'; fg = '#e6e6e6'; acc = '#3a3a3a'
+                style.configure('.', background=bg, foreground=fg)
+                style.configure('TFrame', background=bg)
+                style.configure('TLabel', background=bg, foreground=fg)
+                style.configure('TButton', background=acc, foreground=fg)
+                style.map('TButton',
+                           foreground=[('disabled', '#888888'), ('active', fg), ('pressed', fg)],
+                           background=[('active', '#4a4a4a'), ('pressed', '#444444')])
+                style.configure('TEntry', fieldbackground='#1f1f1f', foreground=fg)
+                style.configure('TCombobox', fieldbackground='#1f1f1f', foreground=fg)
+                style.map('TCombobox', fieldbackground=[('readonly', '#1f1f1f')], foreground=[('readonly', fg)])
+                try:
+                    self.root.configure(bg=bg)
+                    # Basic defaults for classic tk widgets
+                    self.root.option_add("*Background", bg)
+                    self.root.option_add("*Foreground", fg)
+                    self.root.option_add("*Entry.Background", '#1f1f1f')
+                    self.root.option_add("*Entry.Foreground", fg)
+                    self.root.option_add("*Text.Background", '#1f1f1f')
+                    self.root.option_add("*Text.Foreground", fg)
+                    self.root.option_add("*Listbox.Background", '#1f1f1f')
+                    self.root.option_add("*Listbox.Foreground", fg)
+                    self.root.option_add("*Button.Background", acc)
+                    self.root.option_add("*Button.Foreground", fg)
+                    self.root.option_add("*Button.activeBackground", '#4a4a4a')
+                    self.root.option_add("*activeBackground", acc)
+                    self.root.option_add("*selectBackground", '#555555')
+                except Exception:
+                    pass
+            else:
+                # Default light colors are fine; ensure root matches
+                try:
+                    self.root.configure(bg=style.lookup('TFrame', 'background') or '#F0F0F0')
+                except Exception:
+                    pass
+        except Exception:
+            # If anything goes wrong, stick with Tk's default theme
+            pass
 
     def mark_sequence_modified(self, modified=True):
         self.sequence_modified = modified
@@ -174,27 +517,91 @@ class DesktopAutomationApp:
         return True
 
     def _start_pixel_monitor_listener(self):
+        # New pixel monitor popup with live coords & RGB; Enter to confirm
         if self.pixel_monitor_active:
             return
         self.pixel_monitor_active = True
+        win = tk.Toplevel(self.root)
+        self.pixel_capture_instruction_window = win
+        win.title("Pixel Monitor")
+        win.attributes('-topmost', True)
+        win.lift(); win.focus_force();
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+        win.resizable(False, False)
+        info = ttk.Label(win, text="Move mouse over pixel. Press Enter to confirm, Esc to cancel.")
+        info.pack(padx=10, pady=(10, 4))
+        lbl = ttk.Label(win, text="x=0, y=0 | RGB=(0,0,0) | color=black")
+        lbl.pack(padx=10, pady=(0, 10))
 
-        self.pixel_capture_instruction_window = tk.Toplevel(self.root)
-        self.pixel_capture_instruction_window.attributes('-topmost', True)
-        self.pixel_capture_instruction_window.geometry("300x100+100+100")
-        tk.Label(self.pixel_capture_instruction_window,
-                 text="Pixel Monitor Active\nClick anywhere on your primary screen to select a pixel.\nPress ESC in this small window to cancel.").pack(pady=20)
-        self.pixel_capture_instruction_window.focus_force()
+        stop_evt = threading.Event()
+        latest = {'x': 0, 'y': 0, 'rgb': (0, 0, 0)}
 
-        def _on_pixel_capture_escape(event=None):
+        def approx_color_name(r, g, b):
+            # Simple heuristic mapping
+            h = max(r, g, b) - min(r, g, b)
+            if r > 200 and g < 80 and b < 80:
+                return 'red'
+            if g > 200 and r < 80 and b < 80:
+                return 'green'
+            if b > 200 and r < 80 and g < 80:
+                return 'blue'
+            if r > 200 and g > 200 and b < 100:
+                return 'yellow'
+            if r > 180 and g > 150 and b < 80:
+                return 'gold'
+            if r > 120 and g < 80 and b < 80:
+                return 'brown'
+            if r > 200 and g > 200 and b > 200:
+                return 'white'
+            if r < 60 and g < 60 and b < 60:
+                return 'black'
+            return 'gray'
+
+        def poll_mouse():
+            try:
+                while not stop_evt.is_set():
+                    x, y = pyautogui.position()
+                    try:
+                        rgb = pyautogui.pixel(x, y)
+                    except Exception:
+                        rgb = (0, 0, 0)
+                    latest['x'], latest['y'], latest['rgb'] = x, y, rgb
+                    time.sleep(0.016)
+            except Exception:
+                if hasattr(self, 'logger'):
+                    self.logger.exception('Pixel monitor poll error')
+
+        def ui_update():
+            if not win.winfo_exists():
+                return
+            x, y, (r, g, b) = latest['x'], latest['y'], latest['rgb']
+            lbl.config(text=f"x={x}, y={y} | RGB=({r},{g},{b}) | color={approx_color_name(r,g,b)}")
+            win.after(16, ui_update)
+
+        def confirm(_evt=None):
+            try:
+                x, y = latest['x'], latest['y']
+                obj_name = simpledialog.askstring("Name Pixel Object", "Enter a name for this pixel:", parent=win)
+                if obj_name:
+                    obj_data = {"type": "pixel", "coords": (int(x), int(y)), "rgb": latest['rgb']}
+                    if self.add_object(obj_name, obj_data):
+                        simpledialog.messagebox.showinfo("Pixel Captured", f"Pixel '{obj_name}' at ({x},{y}) RGB={latest['rgb']}", parent=win)
+            finally:
+                stop()
+
+        def stop(_evt=None):
+            stop_evt.set()
             self.pixel_monitor_active = False
-            if self.pixel_capture_instruction_window and self.pixel_capture_instruction_window.winfo_exists():
-                self.pixel_capture_instruction_window.destroy()
-            print("Pixel monitoring cancelled.")
+            if win and win.winfo_exists():
+                win.destroy()
 
-        self.pixel_capture_instruction_window.bind("<Escape>", _on_pixel_capture_escape)
-
-        tk.Button(self.pixel_capture_instruction_window, text="Capture Pixel Under Mouse NOW",
-                  command=self._capture_pixel_under_mouse).pack(pady=5)
+        win.bind('<Return>', confirm)
+        win.bind('<Escape>', stop)
+        threading.Thread(target=poll_mouse, daemon=True).start()
+        ui_update()
 
     def _capture_pixel_under_mouse(self):
         if not self.pixel_monitor_active: return
@@ -223,17 +630,123 @@ class DesktopAutomationApp:
             rows = self.grid_rows_var.get(); cols = self.grid_cols_var.get()
             if rows <= 0 or cols <= 0: raise ValueError("Grid dimensions must be positive.")
         except (tk.TclError, ValueError) as e:
-            simpledialog.messagebox.showerror("Error", f"Invalid grid dimensions: {e}. Using 10x10.", parent=self.root)
-            self.grid_rows_var.set(10); self.grid_cols_var.set(10); rows, cols = 10, 10
+            simpledialog.messagebox.showerror("Error", f"Invalid grid dimensions: {e}. Using 50px cell baseline.", parent=self.root)
+            # fallback to baseline ~50px cells
+            rows = max(1, self.screen_height // 50); cols = max(1, self.screen_width // 50)
+            self.grid_rows_var.set(rows); self.grid_cols_var.set(cols)
         self.cell_width = self.screen_width / cols; self.cell_height = self.screen_height / rows
         self.selected_grid_cells = []; self._draw_grid_on_canvas()
         self.grid_canvas.bind("<Button-1>", self._on_grid_cell_click)
+        # Scroll to change grid density: up => smaller boxes (more cells), down => bigger boxes
+        self.grid_canvas.bind("<MouseWheel>", self._on_grid_scroll)
+        # Linux X11 scroll events
+        self.grid_canvas.bind("<Button-4>", lambda e: self._on_grid_scroll(delta=120))
+        self.grid_canvas.bind("<Button-5>", lambda e: self._on_grid_scroll(delta=-120))
         self.grid_window.bind("<Escape>", lambda e: self._confirm_grid_selection(cancelled=True))
         confirm_bar = tk.Frame(self.grid_canvas, bg="lightgray", relief=tk.RAISED, borderwidth=1)
-        tk.Label(confirm_bar, text=f"{rows}x{cols} Grid. Click cells. ESC to cancel.", bg="lightgray").pack(side=tk.LEFT, padx=10)
+        self.grid_confirm_label = tk.Label(confirm_bar, text=f"{rows}x{cols} Grid. Scroll to change. ESC to cancel.", bg="lightgray")
+        self.grid_confirm_label.pack(side=tk.LEFT, padx=10)
         tk.Button(confirm_bar, text="Confirm Selection", command=self._confirm_grid_selection).pack(side=tk.LEFT, padx=10)
         self.grid_canvas.create_window(self.screen_width // 2, 30, window=confirm_bar, anchor="n")
         self.grid_window.focus_force()
+
+    # --- Object overlay preview ---
+    def preview_object_overlay(self, obj_name):
+        try:
+            obj = self.objects.get(obj_name)
+            if not obj:
+                self.show_toast(f"Object not found: {obj_name}")
+                return
+            ov = tk.Toplevel(self.root)
+            ov.attributes('-fullscreen', True)
+            ov.attributes('-alpha', 0.35)
+            ov.attributes('-topmost', True)
+            canvas = tk.Canvas(ov, bg='black', highlightthickness=0)
+            canvas.pack(fill='both', expand=True)
+
+            w, h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+            canvas.config(width=w, height=h)
+            info_bar = tk.Frame(canvas, bg='lightgray')
+            tk.Label(info_bar, text=f"Preview: {obj_name} (Esc to close)", bg='lightgray').pack(side=tk.LEFT, padx=8)
+            tk.Button(info_bar, text='Open Grid', command=self.create_region_grid_mode).pack(side=tk.LEFT, padx=4)
+            tk.Button(info_bar, text='Open Drag', command=self.create_region_drag_mode).pack(side=tk.LEFT, padx=4)
+            canvas.create_window(w//2, 20, window=info_bar, anchor='n')
+
+            def close(_e=None):
+                if ov and ov.winfo_exists():
+                    ov.destroy()
+            ov.bind('<Escape>', close)
+
+            t = obj.get('type')
+            if t == 'image':
+                coords = obj.get('capture_coords') or obj.get('coords')
+                img_path = obj.get('image_path')
+                if coords and img_path and os.path.exists(img_path):
+                    try:
+                        img = Image.open(img_path)
+                        photo = ImageTk.PhotoImage(img)
+                        x, y, w0, h0 = coords
+                        canvas.create_image(x, y, image=photo, anchor='nw')
+                        # keep reference
+                        canvas._photo = photo
+                        canvas.create_rectangle(x, y, x+w0, y+h0, outline='cyan', width=4)
+                        # If image is tiny, also draw crosshair to help focus
+                        if w0 <= 2 and h0 <= 2:
+                            px, py = x + w0//2, y + h0//2
+                            W, H = w, h
+                            g = '#00FF5F'
+                            canvas.create_line(0, py, px - 8, py, fill=g, width=3)
+                            canvas.create_line(px + 8, py, W, py, fill=g, width=3)
+                            canvas.create_line(px, 0, px, py - 8, fill=g, width=3)
+                            canvas.create_line(px, py + 8, px, H, fill=g, width=3)
+                            r = 8
+                            canvas.create_oval(px - r, py - r, px + r, py + r, outline='red', fill='red', width=2)
+                            canvas.create_oval(px - 2, py - 2, px + 2, py + 2, outline='blue', fill='blue', width=1)
+                    except Exception as e:
+                        self.logger.exception('Overlay image error')
+                        self.show_toast('Failed to load image for overlay')
+                else:
+                    self.show_toast('Image object missing file or coords')
+            elif t == 'region':
+                coords = obj.get('coords')
+                if coords:
+                    x, y, w0, h0 = coords
+                    width_px = 8
+                    canvas.create_rectangle(x, y, x+w0, y+h0, outline='red', width=width_px)
+                    # If this is a point-sized region, add crosshair to screen edges + large red dot with blue center
+                    if w0 <= 2 and h0 <= 2:
+                        cx, cy = x + w0//2, y + h0//2
+                        W, H = w, h
+                        g = '#00FF5F'
+                        canvas.create_line(0, cy, cx - 8, cy, fill=g, width=3)
+                        canvas.create_line(cx + 8, cy, W, cy, fill=g, width=3)
+                        canvas.create_line(cx, 0, cx, cy - 8, fill=g, width=3)
+                        canvas.create_line(cx, cy + 8, cx, H, fill=g, width=3)
+                        r = 8
+                        canvas.create_oval(cx - r, cy - r, cx + r, cy + r, outline='red', fill='red', width=2)
+                        canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2, outline='blue', fill='blue', width=1)
+                else:
+                    self.show_toast('Region object missing coords')
+            elif t == 'pixel':
+                coords = obj.get('coords')
+                if coords and len(coords) >= 2:
+                    px, py = coords[0], coords[1]
+                    g = '#00FF5F'
+                    # Crosshair to full screen edges
+                    canvas.create_line(0, py, px - 8, py, fill=g, width=3)
+                    canvas.create_line(px + 8, py, w, py, fill=g, width=3)
+                    canvas.create_line(px, 0, px, py - 8, fill=g, width=3)
+                    canvas.create_line(px, py + 8, px, h, fill=g, width=3)
+                    r = 8
+                    canvas.create_oval(px - r, py - r, px + r, py + r, outline='red', fill='red', width=2)
+                    canvas.create_oval(px - 2, py - 2, px + 2, py + 2, outline='blue', fill='blue', width=1)
+                else:
+                    self.show_toast('Pixel object missing coords')
+        except Exception as e:
+            code = str(uuid.uuid4())[:8]
+            if hasattr(self, 'logger'):
+                self.logger.exception('Overlay error %s', code)
+            self.show_toast(f'Overlay failure (code {code})')
 
     def _draw_grid_on_canvas(self):
         self.grid_canvas.delete("grid_line"); self.grid_canvas.delete("cell_highlight")
@@ -244,6 +757,25 @@ class DesktopAutomationApp:
                 if (r,c) in self.selected_grid_cells: self.grid_canvas.create_rectangle(x1, y1, x2, y2, fill="blue", outline="lightblue", stipple="gray50", tags="cell_highlight")
                 if r < rows: self.grid_canvas.create_line(0, y2, self.screen_width, y2, fill="white", tags="grid_line", width=0.5)
                 if c < cols: self.grid_canvas.create_line(x2, 0, x2, self.screen_height, fill="white", tags="grid_line", width=0.5)
+
+    def _on_grid_scroll(self, event=None, delta=None):
+        # Determine scroll direction
+        d = delta if delta is not None else getattr(event, 'delta', 0)
+        if d == 0:
+            return
+        inc = 3 if d > 0 else -3
+        try:
+            rows = max(1, self.grid_rows_var.get() + inc)
+            cols = max(1, self.grid_cols_var.get() + inc)
+            self.grid_rows_var.set(rows); self.grid_cols_var.set(cols)
+            self.cell_width = self.screen_width / cols; self.cell_height = self.screen_height / rows
+            # changing grid invalidates current cell selections
+            self.selected_grid_cells = []
+            self._draw_grid_on_canvas()
+            if getattr(self, 'grid_confirm_label', None):
+                self.grid_confirm_label.config(text=f"{rows}x{cols} Grid. Scroll to change. ESC to cancel.")
+        except Exception:
+            pass
 
     def _on_grid_cell_click(self, event):
         col = int(event.x // self.cell_width); row = int(event.y // self.cell_height); cell = (row, col)
@@ -589,36 +1121,49 @@ class BaseFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
-        self.configure(bg="#E0E0E0")
+        # Use a neutral background that doesn't fight the system theme
+        try:
+            self.configure(bg=self.master.cget("bg"))
+        except Exception:
+            self.configure(bg="#F5F6F8")
 
 class MainFrame(BaseFrame):
     def __init__(self, parent, controller):
         super().__init__(parent, controller)
-        tk.Label(self, text="Automation Tool", font=("Arial", 16, "bold"), bg=self["bg"]).pack(pady=10)
-        btn_frame_new = tk.Frame(self, bg=self["bg"]); btn_frame_new.pack(pady=5, fill="x", padx=20)
-        tk.Button(btn_frame_new, text="New Sequence", width=20, command=controller.new_sequence).pack(pady=3, fill="x")
-        tk.Button(btn_frame_new, text="Instructions", width=20, command=lambda: controller.show_frame("InstructionsFrame")).pack(pady=3, fill="x")
+        ttk.Label(self, text="Automation Tool", font=("Arial", 16, "bold")).pack(pady=10)
+        btn_frame_new = ttk.Frame(self); btn_frame_new.pack(pady=5, fill="x", padx=20)
+        ttk.Button(btn_frame_new, text="New Sequence", command=controller.new_sequence).pack(pady=3, fill="x")
+        ttk.Button(btn_frame_new, text="Instructions", command=lambda: controller.show_frame("InstructionsFrame")).pack(pady=3, fill="x")
 
-        tk.Label(btn_frame_new, text="Create & Edit", font=("Arial", 12, "underline"), bg=self["bg"]).pack(pady=(8,0))
-        tk.Button(btn_frame_new, text="Object Creation", width=20, command=lambda: controller.show_frame("ObjectCreationFrame")).pack(pady=3, fill="x")
-        tk.Button(btn_frame_new, text="Step Creator", width=20, command=lambda: controller.show_frame("StepCreatorFrame")).pack(pady=3, fill="x")
+        ttk.Label(btn_frame_new, text="Create & Edit", font=("Arial", 12, "underline")).pack(pady=(8,0))
+
+        btn_obj = ttk.Button(btn_frame_new, text="Object Creation", command=controller.open_object_creation_window)
+        btn_obj.pack(pady=3, fill="x")
+        def _obj_same_window(_e=None):
+            controller.show_frame("ObjectCreationFrame"); return "break"
+        btn_obj.bind("<Shift-Button-1>", _obj_same_window)
+        btn_step = ttk.Button(btn_frame_new, text="Step Creator", command=controller.open_step_creator_window)
+        btn_step.pack(pady=3, fill="x")
+        def _step_same_window(_e=None):
+            controller.show_frame("StepCreatorFrame"); return "break"
+        btn_step.bind("<Shift-Button-1>", _step_same_window)
+
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", pady=10, padx=20)
+        ttk.Label(self, text="File Operations", font=("Arial", 12, "underline")).pack(pady=(8,0))
+        file_ops_frame = ttk.Frame(self); file_ops_frame.pack(pady=5,padx=20,fill="x")
+        ttk.Button(file_ops_frame, text="Load Sequence", command=controller.load_sequence).pack(side=tk.LEFT, expand=True, fill="x", padx=(0,3))
+        ttk.Button(file_ops_frame, text="Save Sequence As...", command=controller.save_sequence_as).pack(side=tk.LEFT, expand=True, fill="x", padx=(3,0))
+        loaded_seq_frame = ttk.Frame(self); loaded_seq_frame.pack(pady=5,padx=20,fill="x")
+        ttk.Label(loaded_seq_frame,text="Current:").pack(side=tk.LEFT)
+        self.loaded_seq_label = ttk.Label(loaded_seq_frame,text="No sequence loaded", anchor="w", relief=tk.SUNKEN)
+        self.loaded_seq_label.pack(side=tk.LEFT,expand=True,fill="x")
 
-        tk.Label(self, text="File Operations", font=("Arial", 12, "underline"), bg=self["bg"]).pack(pady=(8,0))
-        file_ops_frame = tk.Frame(self,bg=self["bg"]); file_ops_frame.pack(pady=5,padx=20,fill="x")
-        tk.Button(file_ops_frame, text="Load Sequence", command=controller.load_sequence).pack(side=tk.LEFT, expand=True, fill="x", padx=(0,3))
-        tk.Button(file_ops_frame, text="Save Sequence As...", command=controller.save_sequence_as).pack(side=tk.LEFT, expand=True, fill="x", padx=(3,0))
+        loop_frame = ttk.Frame(self); loop_frame.pack(pady=8,padx=20,fill="x")
+        ttk.Label(loop_frame,text="Loops (0=inf):").pack(side=tk.LEFT)
+        ttk.Entry(loop_frame,textvariable=controller.loop_count,width=6,justify="center").pack(side=tk.LEFT,padx=5)
 
-        loaded_seq_frame = tk.Frame(self,bg=self["bg"]); loaded_seq_frame.pack(pady=5,padx=20,fill="x")
-        tk.Label(loaded_seq_frame,text="Current:",bg=self["bg"]).pack(side=tk.LEFT)
-        self.loaded_seq_label = tk.Label(loaded_seq_frame,text="No sequence loaded",bg="white",relief=tk.SUNKEN,anchor="w"); self.loaded_seq_label.pack(side=tk.LEFT,expand=True,fill="x")
-
-        loop_frame = tk.Frame(self,bg=self["bg"]); loop_frame.pack(pady=8,padx=20,fill="x")
-        tk.Label(loop_frame,text="Loops (0=inf):",bg=self["bg"]).pack(side=tk.LEFT)
-        tk.Entry(loop_frame,textvariable=controller.loop_count,width=5,justify="center").pack(side=tk.LEFT,padx=5)
-
-        tk.Button(self,text="Run Sequence",width=20,font=("Arial",12,"bold"),bg="#A5D6A7",command=controller.run_sequence).pack(pady=15,padx=20,fill="x")
+        ttk.Button(self,text="Run Sequence",width=24,command=controller.run_sequence).pack(pady=15,padx=20,fill="x")
 
     def refresh_content(self):
         if self.controller.current_sequence_name == DEFAULT_PROJECT_NAME and not self.controller.current_project_path:
@@ -631,40 +1176,164 @@ class ObjectCreationFrame(BaseFrame):
     def __init__(self, parent, controller):
         super().__init__(parent, controller)
         self.current_creation_type = "region"
-        tk.Label(self, text="Object Creation", font=("Arial", 16, "bold"), bg=self["bg"]).pack(pady=10)
-        region_frame = tk.LabelFrame(self,text="Region Creation",padx=10,pady=10,bg=self["bg"]); region_frame.pack(pady=5,padx=10,fill="x")
-        grid_dim_frame = tk.Frame(region_frame,bg=self["bg"]); grid_dim_frame.pack(fill="x")
-        tk.Label(grid_dim_frame,text="Grid (W x H):",bg=self["bg"]).pack(side=tk.LEFT,padx=(0,2))
-        tk.Entry(grid_dim_frame,textvariable=controller.grid_cols_var,width=3).pack(side=tk.LEFT)
-        tk.Label(grid_dim_frame,text="x",bg=self["bg"]).pack(side=tk.LEFT,padx=1)
-        tk.Entry(grid_dim_frame,textvariable=controller.grid_rows_var,width=3).pack(side=tk.LEFT,padx=(0,5))
-        tk.Button(grid_dim_frame,text="Grid Mode",command=lambda:self.set_creation_type_and_run("region",controller.create_region_grid_mode)).pack(side=tk.LEFT,expand=True,fill="x")
-        tk.Button(region_frame,text="Drag Mode",command=lambda:self.set_creation_type_and_run("region",controller.create_region_drag_mode)).pack(pady=3,fill="x")
-        tk.Button(region_frame,text="Pixel Monitor",command=controller._start_pixel_monitor_listener).pack(pady=3,fill="x")
-        image_frame = tk.LabelFrame(self,text="Image Creation",padx=10,pady=10,bg=self["bg"]); image_frame.pack(pady=5,padx=10,fill="x")
-        tk.Button(image_frame,text="Grid Mode (Capture)",command=lambda:self.set_creation_type_and_run("image",controller.create_region_grid_mode)).pack(pady=3,fill="x")
-        tk.Button(image_frame,text="Drag Mode (Capture)",command=lambda:self.set_creation_type_and_run("image",controller.create_region_drag_mode)).pack(pady=3,fill="x")
-        sound_frame = tk.LabelFrame(self,text="Sound Creation (Future)",padx=10,pady=10,bg=self["bg"]); sound_frame.pack(pady=5,padx=10,fill="x")
-        tk.Button(sound_frame,text="Sound Recording",state=tk.DISABLED).pack(pady=3,fill="x")
-        self.objects_list_frame=tk.LabelFrame(self,text="Created Objects",padx=10,pady=10,bg=self["bg"]); self.objects_list_frame.pack(pady=5,padx=10,fill="both",expand=True)
-        self.objects_text=scrolledtext.ScrolledText(self.objects_list_frame,height=4,wrap=tk.WORD,state=tk.DISABLED); self.objects_text.pack(fill="both",expand=True)
-        tk.Button(self,text="Back to Main Menu",command=lambda:controller.show_frame("MainFrame")).pack(pady=10,side=tk.BOTTOM)
+        ttk.Label(self, text="Object Creation", font=("Arial", 16, "bold")).pack(pady=10)
+        region_frame = ttk.Labelframe(self, text="Region Creation", padding=10); region_frame.pack(pady=5,padx=10,fill="x")
+        grid_dim_frame = ttk.Frame(region_frame); grid_dim_frame.pack(fill="x")
+        ttk.Label(grid_dim_frame, text="Grid (W x H):").pack(side=tk.LEFT,padx=(0,2))
+        ttk.Entry(grid_dim_frame, textvariable=controller.grid_cols_var, width=4).pack(side=tk.LEFT)
+        ttk.Label(grid_dim_frame, text="x").pack(side=tk.LEFT,padx=1)
+        ttk.Entry(grid_dim_frame, textvariable=controller.grid_rows_var, width=4).pack(side=tk.LEFT,padx=(0,5))
+        ttk.Button(grid_dim_frame, text="Grid Mode", command=lambda:self.set_creation_type_and_run("region",controller.create_region_grid_mode)).pack(side=tk.LEFT,expand=True,fill="x")
+        ttk.Button(region_frame, text="Drag Mode", command=lambda:self.set_creation_type_and_run("region",controller.create_region_drag_mode)).pack(pady=3,fill="x")
+        ttk.Button(region_frame, text="Point (Mouse Pos)", command=lambda: self.create_point_region_from_mouse()).pack(pady=3,fill="x")
+        ttk.Button(region_frame, text="Pixel Monitor", command=controller._start_pixel_monitor_listener).pack(pady=3,fill="x")
+        image_frame = ttk.Labelframe(self, text="Image Creation", padding=10); image_frame.pack(pady=5,padx=10,fill="x")
+        ttk.Button(image_frame, text="Grid Mode (Capture)", command=lambda:self.set_creation_type_and_run("image",controller.create_region_grid_mode)).pack(pady=3,fill="x")
+        ttk.Button(image_frame, text="Drag Mode (Capture)", command=lambda:self.set_creation_type_and_run("image",controller.create_region_drag_mode)).pack(pady=3,fill="x")
+        sound_frame = ttk.Labelframe(self, text="Sound Creation (Future)", padding=10); sound_frame.pack(pady=5,padx=10,fill="x")
+        ttk.Button(sound_frame, text="Sound Recording", state=tk.DISABLED).pack(pady=3,fill="x")
+        self.objects_list_frame=ttk.Labelframe(self, text="Created Objects", padding=10); self.objects_list_frame.pack(pady=5,padx=10,fill="both",expand=True)
+        cols = ("Name", "Type", "Details")
+        self.objects_tree = ttk.Treeview(self.objects_list_frame, columns=cols, show='headings', height=8)
+        for c in cols:
+            self.objects_tree.heading(c, text=c)
+        self.objects_tree.column("Name", width=200)
+        self.objects_tree.column("Type", width=80)
+        self.objects_tree.column("Details", width=420)
+        self.objects_tree.pack(fill="both", expand=True)
+        self.objects_tree.bind('<Double-1>', self._on_object_double_click)
+        btn_bar = ttk.Frame(self.objects_list_frame)
+        btn_bar.pack(fill='x', pady=4)
+        ttk.Button(btn_bar, text='Delete Selected', command=self._delete_selected_object).pack(side=tk.RIGHT)
+        ttk.Button(self, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame")).pack(pady=10, side=tk.BOTTOM)
     def set_creation_type_and_run(self,c_type,func_to_run): self.current_creation_type=c_type; func_to_run()
+    def create_point_region_from_mouse(self):
+        # Popup with live coords; Enter to confirm, Esc to cancel
+        pop = tk.Toplevel(self.controller.root)
+        pop.title("Select Mouse Point")
+        pop.attributes('-topmost', True)
+        pop.lift(); pop.focus_force();
+        try:
+            pop.grab_set()
+        except Exception:
+            pass
+        ttk.Label(pop, text="Move mouse to target, press Enter to confirm, Esc to cancel.").pack(padx=10, pady=(10,4))
+        lab = ttk.Label(pop, text="x=0, y=0")
+        lab.pack(padx=10, pady=(0,10))
+        stop_evt = threading.Event()
+        latest = {'x': 0, 'y': 0}
+
+        def poll():
+            while not stop_evt.is_set():
+                x, y = pyautogui.position()
+                latest['x'], latest['y'] = x, y
+                time.sleep(0.016)
+
+        def ui_update():
+            if not pop.winfo_exists():
+                return
+            lab.config(text=f"x={latest['x']}, y={latest['y']}")
+            pop.after(16, ui_update)
+
+        def confirm(_e=None):
+            try:
+                x, y = latest['x'], latest['y']
+                obj_name = simpledialog.askstring("Name Region Point", "Enter name:", parent=pop)
+                if obj_name:
+                    coords = (int(x), int(y), 1, 1)
+                    obj_data = {"type": "region", "mode": "point", "coords": coords}
+                    if self.controller.add_object(obj_name, obj_data):
+                        self.controller.show_toast(f"Point '{obj_name}' at ({x},{y}) saved")
+            finally:
+                cancel()
+
+        def cancel(_e=None):
+            stop_evt.set()
+            if pop and pop.winfo_exists(): pop.destroy()
+
+        threading.Thread(target=poll, daemon=True).start()
+        ui_update()
+        pop.bind('<Return>', confirm)
+        pop.bind('<Escape>', cancel)
     def update_objects_display(self):
-        self.objects_text.config(state=tk.NORMAL); self.objects_text.delete(1.0,tk.END)
-        if not self.controller.objects: self.objects_text.insert(tk.END,"No objects created yet.")
-        else:
+        try:
+            for i in self.objects_tree.get_children(''):
+                self.objects_tree.delete(i)
             for name,data in self.controller.objects.items():
                 obj_type=data.get("type","N/A"); details=""
-                if obj_type=="region" or obj_type=="image": details=f"Coords: {data.get('coords')}"
-                if obj_type=="image" and data.get('image_path'): details+=f", Path: {os.path.basename(data['image_path'])}"
-                elif obj_type=="pixel": details=f"Coords: {data.get('coords')}, RGB: {data.get('rgb')}"
-                self.objects_text.insert(tk.END,f"- {name} ({obj_type.capitalize()}): {details}\n")
-        self.objects_text.config(state=tk.DISABLED)
+                if obj_type in ("region","image") and data.get('coords'):
+                    details=f"Coords: {data.get('coords')}"
+                if obj_type=="image" and data.get('image_path'):
+                    details+=f", Path: {os.path.basename(data['image_path'])}"
+                elif obj_type=="pixel":
+                    details=f"Coords: {data.get('coords')}, RGB: {data.get('rgb')}"
+                self.objects_tree.insert('', 'end', values=(name, obj_type, details))
+        except Exception as e:
+            if hasattr(self.controller,'logger'):
+                self.controller.logger.exception('update_objects_display failed')
     def refresh_content(self): self.update_objects_display()
+
+    def _delete_selected_object(self):
+        try:
+            sel = self.objects_tree.selection()
+            if not sel:
+                return
+            vals = self.objects_tree.item(sel[0], 'values')
+            if not vals:
+                return
+            name = vals[0]
+            if simpledialog.messagebox.askyesno('Delete Object', f"Delete object '{name}'? This cannot be undone.", parent=self.controller.root):
+                if name in self.controller.objects:
+                    del self.controller.objects[name]
+                    self.update_objects_display()
+                    try:
+                        self.controller.frames["StepCreatorFrame"].refresh_object_dropdowns()
+                    except Exception:
+                        pass
+                    self.controller.show_toast(f"Deleted object: {name}")
+                    self.controller.mark_sequence_modified()
+        except Exception as e:
+            if hasattr(self.controller, 'logger'):
+                self.controller.logger.exception('Delete object failed')
+    def _on_object_double_click(self, event=None):
+        try:
+            sel = self.objects_tree.selection()
+            if not sel: return
+            item = sel[0]
+            vals = self.objects_tree.item(item, 'values')
+            if not vals: return
+            name = vals[0]
+            self.controller.preview_object_overlay(name)
+        except Exception as e:
+            if hasattr(self.controller,'logger'):
+                self.controller.logger.exception('object overlay failed')
 
 
 class StepCreatorFrame(BaseFrame):
+    def _type_abbrev(self, t):
+        return {"image": "img", "pixel": "RGB", "region": "reg"}.get(t or "", "-")
+
+    def _display_name_for_object(self, name):
+        if not name:
+            return "(Global/Control)"
+        obj = self.controller.objects.get(name)
+        if not obj:
+            return name
+        ab = self._type_abbrev(obj.get("type"))
+        return f"{name} ({ab})"
+
+    def _get_object_display_names(self):
+        names = [self._display_name_for_object(n) for n in self.controller.get_object_names()]
+        names.append("(Global/Control)")
+        return names
+
+    def _name_from_display(self, display):
+        if display == "(Global/Control)":
+            return None
+        # Expect "Name (abbrev)"; split from right
+        if display.endswith(")") and " (" in display:
+            return display.rsplit(" (", 1)[0]
+        return display
     ACTION_CONFIG = {
         "region": ["Click", "Type into Region (Future)"],
         "pixel": ["Click", "Wait for Pixel Color"],
@@ -677,63 +1346,93 @@ class StepCreatorFrame(BaseFrame):
         super().__init__(parent, controller)
         self.step_widgets = []
 
-        tk.Label(self, text="Step Creator", font=("Arial", 16, "bold"), bg=self["bg"]).pack(pady=5)
+        ttk.Label(self, text="Step Creator", font=("Segoe UI", 14, "bold")).pack(pady=(6,2))
 
-        toolbar_frame = tk.Frame(self, bg=self["bg"])
-        toolbar_frame.pack(fill="x", padx=10, pady=(0,5))
-        tk.Button(toolbar_frame, text="+ Add Step", command=self.add_step_row).pack(side=tk.LEFT, padx=2)
-        tk.Button(toolbar_frame, text="Save Sequence", command=self.controller.save_sequence).pack(side=tk.LEFT, padx=2)
+        toolbar_frame = ttk.Frame(self)
+        toolbar_frame.pack(fill="x", padx=12, pady=(0,6))
+        ttk.Button(toolbar_frame, text="+ Add Step", command=self.add_step_row).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar_frame, text="Save Sequence", command=self.controller.save_sequence).pack(side=tk.LEFT, padx=4)
+        ttk.Button(toolbar_frame, text="Back to Main Menu", command=lambda: self.controller.show_frame("MainFrame")).pack(side=tk.RIGHT)
 
-        header_frame = tk.Frame(self, bg=self["bg"])
-        header_frame.pack(fill="x", padx=10, pady=(0,2))
-        tk.Label(header_frame, text="Ord", width=4, bg=self["bg"]).pack(side=tk.LEFT, padx=(0,2))
-        tk.Label(header_frame, text="Step#", width=5, bg=self["bg"]).pack(side=tk.LEFT, padx=2)
-        tk.Label(header_frame, text="Object", width=17, bg=self["bg"]).pack(side=tk.LEFT, padx=2)
-        tk.Label(header_frame, text="Action", width=17, bg=self["bg"]).pack(side=tk.LEFT, padx=2)
-        tk.Label(header_frame, text="Parameters", bg=self["bg"]).pack(side=tk.LEFT, padx=2, fill="x", expand=True)
+        header_frame = ttk.Frame(self)
+        header_frame.pack(fill="x", padx=12, pady=(0,2))
+        _hf = ("Segoe UI", 10, "bold")
+        ttk.Label(header_frame, text="Ord", width=4, font=_hf).pack(side=tk.LEFT, padx=(0,4))
+        ttk.Label(header_frame, text="Step#", width=5, font=_hf).pack(side=tk.LEFT, padx=2)
+        ttk.Label(header_frame, text="Object", width=20, font=_hf).pack(side=tk.LEFT, padx=2)
+        ttk.Label(header_frame, text="Type", width=8, font=_hf).pack(side=tk.LEFT, padx=2)
+        ttk.Label(header_frame, text="Action", width=18, font=_hf).pack(side=tk.LEFT, padx=2)
+        ttk.Label(header_frame, text="Parameters", font=_hf).pack(side=tk.LEFT, padx=2, fill="x", expand=True)
+        ttk.Separator(self, orient="horizontal").pack(fill="x", padx=12)
 
-        self.canvas_steps = tk.Canvas(self, borderwidth=0, background="#ffffff")
-        self.steps_area_frame = tk.Frame(self.canvas_steps, background="#ffffff")
+        _style = ttk.Style(); _bg = _style.lookup('TFrame', 'background') or self["bg"]
+        self.canvas_steps = tk.Canvas(self, borderwidth=0, background=_bg, highlightthickness=0)
+        self.steps_area_frame = tk.Frame(self.canvas_steps, background=_bg)
         self.scrollbar_steps = tk.Scrollbar(self, orient="vertical", command=self.canvas_steps.yview)
         self.canvas_steps.configure(yscrollcommand=self.scrollbar_steps.set)
-        self.scrollbar_steps.pack(side="right", fill="y", padx=(0,5), pady=5)
-        self.canvas_steps.pack(side="left", fill="both", expand=True, padx=(5,0), pady=5)
+        self.scrollbar_steps.pack(side="right", fill="y", padx=(0,6), pady=6)
+        self.canvas_steps.pack(side="left", fill="both", expand=True, padx=(6,0), pady=6)
         self.canvas_steps_window = self.canvas_steps.create_window((0,0), window=self.steps_area_frame, anchor="nw", tags="self.steps_area_frame")
         self.steps_area_frame.bind("<Configure>", lambda e: self.canvas_steps.configure(scrollregion=self.canvas_steps.bbox("all")))
+        self.canvas_steps.bind("<Configure>", lambda e: self.canvas_steps.itemconfig(self.canvas_steps_window, width=e.width))
         
         self.canvas_steps.bind("<MouseWheel>", self._on_mousewheel)
         self.steps_area_frame.bind("<MouseWheel>", self._on_mousewheel)
+        # Always scroll even when focus is on child widgets (Windows)
+        self.bind_all("<MouseWheel>", self._on_mousewheel)
+        # Linux scroll
+        self.bind_all("<Button-4>", lambda e: self._on_mousewheel(type('evt', (), {'delta': 120})) )
+        self.bind_all("<Button-5>", lambda e: self._on_mousewheel(type('evt', (), {'delta': -120})) )
 
-        self.add_step_row()
+        self.add_step_row(mark_modified=False)
 
-        tk.Button(self, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame")).pack(pady=10, side=tk.BOTTOM)
+        # Back/Close is now on the toolbar
 
     def _on_mousewheel(self, event):
         self.canvas_steps.yview_scroll(int(-1*(event.delta/120)), "units")
 
-    def add_step_row(self, step_data=None, insert_at_index=None):
-        row_frame = tk.Frame(self.steps_area_frame, bg="#F0F0F0", pady=2, relief=tk.RIDGE, borderwidth=1)
-        row_frame.pack(fill="x", expand=True, pady=1)
+    def add_delay_between_rows(self, seconds=1.0):
+        # Insert a delay after each non-delay row
+        inserts = []
+        for idx, entry in enumerate(list(self.step_widgets)):
+            if entry["action_var"].get() != "Wait":
+                inserts.append(idx + 1)
+        offset = 0
+        for pos in inserts:
+            self.add_step_row(step_data={"object_name": None, "action": "Wait", "params": {"duration_s": float(seconds)}}, insert_at_index=pos + offset)
+            offset += 1
+        if inserts:
+            self.controller.mark_sequence_modified()
 
-        order_btn_frame = tk.Frame(row_frame, bg=row_frame["bg"])
+    def add_step_row(self, step_data=None, insert_at_index=None, mark_modified=True):
+        _style = ttk.Style(); _bg = _style.lookup('TFrame', 'background') or self.steps_area_frame.cget('bg')
+        row_frame = ttk.Frame(self.steps_area_frame)
+        row_frame.pack(fill="x", expand=True, pady=4, padx=6)
+
+        order_btn_frame = ttk.Frame(row_frame)
         order_btn_frame.pack(side=tk.LEFT, padx=(2,0), fill="y")
-        tk.Button(order_btn_frame, text="▲", width=1, command=lambda idx=len(self.step_widgets): self.move_step_up(idx)).pack(pady=0, ipady=0)
-        tk.Button(order_btn_frame, text="▼", width=1, command=lambda idx=len(self.step_widgets): self.move_step_down(idx)).pack(pady=0, ipady=0)
+        ttk.Button(order_btn_frame, text="▲", width=2, command=lambda idx=len(self.step_widgets): self.move_step_up(idx)).pack(pady=0)
+        ttk.Button(order_btn_frame, text="▼", width=2, command=lambda idx=len(self.step_widgets): self.move_step_down(idx)).pack(pady=0)
 
-        step_num_label = tk.Label(row_frame, text="", width=4, bg=row_frame["bg"])
+        step_num_label = ttk.Label(row_frame, text="", width=4)
         step_num_label.pack(side=tk.LEFT, padx=2)
 
         obj_var = tk.StringVar(); action_var = tk.StringVar()
-        obj_dropdown = ttk.Combobox(row_frame, textvariable=obj_var, values=self.controller.get_object_names() + ["(Global/Control)"], width=15, state="readonly")
-        obj_dropdown.pack(side=tk.LEFT, padx=3)
-        action_dropdown = ttk.Combobox(row_frame, textvariable=action_var, width=15, state="readonly")
-        action_dropdown.pack(side=tk.LEFT, padx=3)
+        obj_dropdown = ttk.Combobox(row_frame, textvariable=obj_var, values=self._get_object_display_names(), width=22, state="readonly")
+        obj_dropdown.pack(side=tk.LEFT, padx=4)
+        obj_type_label = ttk.Label(row_frame, text="", width=8)
+        obj_type_label.pack(side=tk.LEFT, padx=2)
+        action_dropdown = ttk.Combobox(row_frame, textvariable=action_var, width=18, state="readonly")
+        action_dropdown.pack(side=tk.LEFT, padx=4)
 
-        params_display_frame = tk.Frame(row_frame, bg=row_frame["bg"])
+        params_display_frame = ttk.Frame(row_frame)
         params_display_frame.pack(side=tk.LEFT, padx=3, fill="x", expand=True)
-        params_edit_button = tk.Button(row_frame, text="Edit Params", width=10)
+
+        params_edit_button = ttk.Button(row_frame, text="Edit")
         params_edit_button.pack(side=tk.LEFT, padx=3)
-        del_button = tk.Button(row_frame, text="X", fg="red", width=2, command=lambda rf=row_frame: self.delete_step_row_by_frame(rf))
+        # Quick add-delay (1.0s) after this row
+        ttk.Button(row_frame, text="+1s", width=6, command=lambda rf=row_frame: self.insert_delay_after(self._index_of_row_frame(rf), 1.0)).pack(side=tk.LEFT, padx=2)
+        del_button = ttk.Button(row_frame, text="✖", width=2, command=lambda rf=row_frame: self.delete_step_row_by_frame(rf))
         del_button.pack(side=tk.LEFT, padx=(3,2))
 
         current_step_entry = {
@@ -761,10 +1460,25 @@ class StepCreatorFrame(BaseFrame):
             current_step_entry["params"] = step_data.get("params", {}).copy()
         else:
             obj_var.set("(Global/Control)")
-            if insert_at_index is None:
+            if mark_modified and insert_at_index is None:
                  self.controller.mark_sequence_modified()
 
         self._renumber_and_reorder_visuals()
+
+    def _index_of_row_frame(self, rf):
+        for i, entry in enumerate(self.step_widgets):
+            if entry.get("frame") is rf:
+                return i
+        return len(self.step_widgets) - 1
+
+    def insert_delay_after(self, index, seconds=1.0):
+        if index is None:
+            index = len(self.step_widgets) - 1
+        step_data = {"object_name": None, "action": "Wait", "params": {"duration_s": float(seconds)}}
+        # insert at index+1 (after current row)
+        insert_at = min(index + 1, len(self.step_widgets))
+        self.add_step_row(step_data=step_data, insert_at_index=insert_at)
+        self.controller.mark_sequence_modified()
 
     def delete_step_row_by_frame(self, row_frame_to_delete):
         index_to_delete = -1
@@ -782,13 +1496,18 @@ class StepCreatorFrame(BaseFrame):
 
     def _renumber_and_reorder_visuals(self):
         for i, entry in enumerate(self.step_widgets):
-            entry["step_num_label"].config(text=f"{i+1}.")
+            entry["step_num_label"].config(text=f"{i+1}.", font=("Segoe UI", 10, "bold"))
             up_button, down_button = entry["order_buttons"].winfo_children()
+            try:
+                up_button.config(text="▲", width=2, relief=tk.FLAT)
+                down_button.config(text="▼", width=2, relief=tk.FLAT)
+            except Exception:
+                pass
             up_button.config(command=lambda current_idx=i: self.move_step_up(current_idx))
             down_button.config(command=lambda current_idx=i: self.move_step_down(current_idx))
             
             entry["frame"].pack_forget()
-            entry["frame"].pack(fill="x", expand=True, pady=1)
+            entry["frame"].pack(fill="x", expand=True, pady=4, padx=6)
 
         self.steps_area_frame.update_idletasks()
         self.canvas_steps.config(scrollregion=self.canvas_steps.bbox("all"))
@@ -809,17 +1528,23 @@ class StepCreatorFrame(BaseFrame):
 
     def update_action_dropdown_and_params_ui(self, step_entry):
         obj_var = step_entry["obj_var"]; action_dropdown = step_entry["action_dropdown"]
-        selected_obj_name = obj_var.get()
+        selected_display = obj_var.get()
+        selected_obj_name = self._name_from_display(selected_display)
         
         current_actions = []
-        if selected_obj_name == "(Global/Control)":
+        if selected_obj_name is None:
             current_actions.extend(self.ACTION_CONFIG["_global_"]); current_actions.extend(self.ACTION_CONFIG["_control_"])
+            if step_entry.get("obj_type_label") is not None:
+                step_entry["obj_type_label"].config(text="-")
         else:
             obj_data = self.controller.objects.get(selected_obj_name)
             if obj_data:
                 obj_type = obj_data.get("type")
                 obj_specific_actions = self.ACTION_CONFIG.get(obj_type, [])
                 current_actions = obj_specific_actions + [ga for ga in self.ACTION_CONFIG["_global_"] if ga not in obj_specific_actions]
+                # Update type label if present
+                if step_entry.get("obj_type_label") is not None:
+                    step_entry["obj_type_label"].config(text=self._type_abbrev(obj_type))
         
         action_dropdown['values'] = sorted(list(set(current_actions)))
         
@@ -840,14 +1565,14 @@ class StepCreatorFrame(BaseFrame):
         step_entry["params_button"].pack_forget()
 
         def create_labeled_entry(parent, label_text, param_key, default_value="", width=8):
-            tk.Label(parent, text=label_text, bg=parent["bg"]).pack(side=tk.LEFT, padx=(0,1))
+            ttk.Label(parent, text=label_text).pack(side=tk.LEFT, padx=(0,1))
             var = tk.StringVar(value=str(params.get(param_key, default_value)))
             entry = tk.Entry(parent, textvariable=var, width=width)
             entry.pack(side=tk.LEFT, padx=(0,3)); step_entry["dynamic_param_widgets"][param_key] = var
             return var
 
         def create_labeled_combobox(parent, label_text, param_key, values_list, default_value="", width=10):
-            tk.Label(parent, text=label_text, bg=parent["bg"]).pack(side=tk.LEFT, padx=(0,1))
+            ttk.Label(parent, text=label_text).pack(side=tk.LEFT, padx=(0,1))
             var = tk.StringVar(value=str(params.get(param_key, default_value)))
             if default_value not in values_list and values_list: var.set(values_list[0])
             elif not values_list: var.set("")
@@ -866,19 +1591,19 @@ class StepCreatorFrame(BaseFrame):
             create_labeled_combobox(frame, "Hotkey:", "selected_hotkey_name", PREDEFINED_HOTKEY_NAMES, params.get("selected_hotkey_name", PREDEFINED_HOTKEY_NAMES[0] if PREDEFINED_HOTKEY_NAMES else ""), width=30)
         elif action == "Click":
             step_entry["params_button"].pack(side=tk.LEFT, padx=3)
-            if params: tk.Label(frame,text=f"Btn:{params.get('button','L')}, Clicks:{params.get('clicks',1)}", bg=frame["bg"], font=("Arial",7)).pack(side=tk.LEFT)
+            if params: ttk.Label(frame, text=f"Btn:{params.get('button','L')}, Clicks:{params.get('clicks',1)}" ).pack(side=tk.LEFT)
         elif action == "Scroll":
             step_entry["params_button"].pack(side=tk.LEFT, padx=3)
-            if params: tk.Label(frame,text=f"Dir:{params.get('direction','Down')}, Amt:{params.get('amount',10)}", bg=frame["bg"], font=("Arial",7)).pack(side=tk.LEFT)
+            if params: ttk.Label(frame, text=f"Dir:{params.get('direction','Down')}, Amt:{params.get('amount',10)}" ).pack(side=tk.LEFT)
         elif action == "Wait for Image":
             create_labeled_entry(frame, "Timeout:", "timeout_s", 10, width=4)
-            create_labeled_entry(frame, "Conf:", "confidence", params.get("confidence", self.controller.objects.get(step_entry["obj_var"].get(), {}).get("confidence",0.8)), width=4)
+            create_labeled_entry(frame, "Conf:", "confidence", params.get("confidence", self.controller.objects.get(self._name_from_display(step_entry["obj_var"].get()), {}).get("confidence",0.8)), width=4)
         elif action == "Wait for Pixel Color":
             create_labeled_entry(frame, "Timeout:", "timeout_s", 10, width=4); step_entry["params_button"].pack(side=tk.LEFT, padx=3)
         elif action == "Goto Step":
             create_labeled_entry(frame, "Target Step#:", "target_step", 1, width=4)
         elif action == "If Image Found":
-            tk.Label(frame, text="If Obj:", bg=frame["bg"]).pack(side=tk.LEFT, padx=(0,1))
+            ttk.Label(frame, text="If Obj:").pack(side=tk.LEFT, padx=(0,1))
             cond_obj_var = tk.StringVar(value=params.get("condition_object_name", ""))
             cond_obj_combo = ttk.Combobox(frame, textvariable=cond_obj_var, values=self.controller.get_object_names(object_type="image"), width=10, state="readonly")
             cond_obj_combo.pack(side=tk.LEFT, padx=(0,2)); step_entry["dynamic_param_widgets"]["condition_object_name"] = cond_obj_var
@@ -886,7 +1611,7 @@ class StepCreatorFrame(BaseFrame):
             create_labeled_entry(frame, "Else#:", "else_step", params.get("else_step","Next"), width=4)
             create_labeled_entry(frame, "Conf:", "confidence", params.get("confidence",0.8), width=3)
         elif action == "If Pixel Color":
-            tk.Label(frame, text="If Obj:", bg=frame["bg"]).pack(side=tk.LEFT, padx=(0,1))
+            ttk.Label(frame, text="If Obj:").pack(side=tk.LEFT, padx=(0,1))
             cond_obj_var = tk.StringVar(value=params.get("condition_object_name", ""))
             cond_obj_combo = ttk.Combobox(frame, textvariable=cond_obj_var, values=self.controller.get_object_names(object_type="pixel"), width=10, state="readonly")
             cond_obj_combo.pack(side=tk.LEFT, padx=(0,2)); step_entry["dynamic_param_widgets"]["condition_object_name"] = cond_obj_var
@@ -894,8 +1619,23 @@ class StepCreatorFrame(BaseFrame):
             create_labeled_entry(frame, "Else#:", "else_step", params.get("else_step","Next"), width=4)
             step_entry["params_button"].pack(side=tk.LEFT, padx=3)
 
+        # Always show a small note field at the end
+        try:
+            ttk.Label(frame, text="Note:").pack(side=tk.LEFT, padx=(6,2))
+            from tkinter import scrolledtext as _st
+            existing = step_entry.get("note_widget")
+            if existing and existing.winfo_exists():
+                existing.destroy()
+            note_widget = _st.ScrolledText(frame, width=30, height=2, wrap=tk.WORD)
+            note_text = step_entry.get("note_var").get() if isinstance(step_entry.get("note_var"), tk.StringVar) else str(step_entry.get("params", {}).get("note", ""))
+            note_widget.insert(tk.INSERT, note_text)
+            step_entry["note_widget"] = note_widget
+            note_widget.pack(side=tk.LEFT, padx=(0,3))
+        except Exception:
+            pass
+
     def edit_step_params_dialog(self, step_entry):
-        action = step_entry["action_var"].get(); obj_name = step_entry["obj_var"].get()
+        action = step_entry["action_var"].get(); obj_name = self._name_from_display(step_entry["obj_var"].get())
         current_params = step_entry["params"]; dialog_made_change = False; dialog = None
         if action == "Click": dialog = ClickParamsDialog(self, "Click Action Parameters", current_params.copy())
         elif action == "Wait": dialog = WaitParamsDialog(self, "Wait Action Parameters", current_params.copy())
@@ -917,17 +1657,25 @@ class StepCreatorFrame(BaseFrame):
 
     def refresh_content(self): self.clear_and_rebuild_steps(self.controller.current_steps)
     def refresh_object_dropdowns(self):
-        all_obj_names = self.controller.get_object_names() + ["(Global/Control)"]
+        all_display = self._get_object_display_names()
         for step_entry in self.step_widgets:
-            current_selection = step_entry["obj_var"].get()
-            step_entry["obj_dropdown"]["values"] = all_obj_names
-            if current_selection not in all_obj_names: step_entry["obj_var"].set("(Global/Control)")
-            else: self.update_action_dropdown_and_params_ui(step_entry)
+            current_display = step_entry["obj_var"].get()
+            base_name = self._name_from_display(current_display)
+            step_entry["obj_dropdown"]["values"] = all_display
+            # Rebuild a correct display string if base exists
+            if base_name is None:
+                step_entry["obj_var"].set("(Global/Control)")
+            elif base_name in self.controller.objects:
+                step_entry["obj_var"].set(self._display_name_for_object(base_name))
+            else:
+                step_entry["obj_var"].set("(Global/Control)")
+            self.update_action_dropdown_and_params_ui(step_entry)
 
     def finalize_steps_for_controller(self):
         self.controller.current_steps = []
         for _, sw_entry in enumerate(self.step_widgets):
-            obj_name = sw_entry["obj_var"].get(); action = sw_entry["action_var"].get()
+            obj_display = sw_entry["obj_var"].get(); action = sw_entry["action_var"].get()
+            obj_name = self._name_from_display(obj_display)
             final_params = sw_entry["params"].copy()
             for param_key, str_var_widget in sw_entry.get("dynamic_param_widgets", {}).items():
                 value = str_var_widget.get()
@@ -944,10 +1692,20 @@ class StepCreatorFrame(BaseFrame):
                     except ValueError: final_params[param_key] = value
                 else: final_params[param_key] = value
             if action:
+                note_text = ""
+                try:
+                    nw = sw_entry.get("note_widget")
+                    if nw is not None and nw.winfo_exists():
+                        note_text = nw.get('1.0', tk.END).strip()
+                    else:
+                        note_text = sw_entry.get("note_var", tk.StringVar(value="")).get()
+                except Exception:
+                    note_text = sw_entry.get("note_var", tk.StringVar(value="")).get()
                 self.controller.current_steps.append({
-                    "object_name": obj_name if obj_name != "(Global/Control)" else None,
+                    "object_name": obj_name if obj_name is not None else None,
                     "action": action,
-                    "params": final_params
+                    "params": final_params,
+                    "note": note_text
                 })
         print("Finalized steps for controller:", self.controller.current_steps)
 
@@ -1225,13 +1983,25 @@ class ImageWaitParamsDialog(BaseParamsDialog):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    app_root = tk.Tk()
     try:
-        style = ttk.Style(app_root)
-        if 'clam' in style.theme_names(): style.theme_use('clam')
-        elif 'vista' in style.theme_names(): style.theme_use('vista')
-    except tk.TclError: print("TTK themes not available or failed to apply.")
-    app_instance = DesktopAutomationApp(app_root)
-    if hasattr(app_instance.frames["StepCreatorFrame"], 'finalize_steps_for_controller'):
-        app_instance.frames["StepCreatorFrame"].finalize_steps_for_controller()
-    app_root.mainloop()
+        app_root = tk.Tk()
+        app_instance = DesktopAutomationApp(app_root)
+        if hasattr(app_instance.frames["StepCreatorFrame"], 'finalize_steps_for_controller'):
+            app_instance.frames["StepCreatorFrame"].finalize_steps_for_controller()
+        app_root.mainloop()
+    except Exception as e:
+        # Best-effort startup logging
+        try:
+            os.makedirs('logs', exist_ok=True)
+            with open(os.path.join('logs', 'startup_error.log'), 'a', encoding='utf-8') as f:
+                import traceback
+                f.write("\n=== Startup Error ===\n")
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        raise
+
+
+
+
+
