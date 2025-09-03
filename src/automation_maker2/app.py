@@ -1455,10 +1455,10 @@ class StepCreatorFrame(BaseFrame):
         action_var.trace_add("write", lambda *args, entry=current_step_entry: self.update_params_ui_for_action(entry))
 
         if step_data:
+            current_step_entry["params"] = step_data.get("params", {}).copy()
             obj_val = step_data.get("object_name")
             obj_var.set(obj_val if obj_val else "(Global/Control)")
             action_var.set(step_data.get("action", ""))
-            current_step_entry["params"] = step_data.get("params", {}).copy()
         else:
             obj_var.set("(Global/Control)")
             if mark_modified and insert_at_index is None:
@@ -1567,7 +1567,10 @@ class StepCreatorFrame(BaseFrame):
 
         def create_labeled_entry(parent, label_text, param_key, default_value="", width=8):
             ttk.Label(parent, text=label_text).pack(side=tk.LEFT, padx=(0,1))
-            var = tk.StringVar(value=str(params.get(param_key, default_value)))
+            value = params.get(param_key, default_value)
+            if value is None:
+                value = default_value
+            var = tk.StringVar(value=str(value))
             entry = tk.Entry(parent, textvariable=var, width=width)
             entry.pack(side=tk.LEFT, padx=(0,3)); step_entry["dynamic_param_widgets"][param_key] = var
             return var
@@ -1608,16 +1611,16 @@ class StepCreatorFrame(BaseFrame):
             cond_obj_var = tk.StringVar(value=params.get("condition_object_name", ""))
             cond_obj_combo = ttk.Combobox(frame, textvariable=cond_obj_var, values=self.controller.get_object_names(object_type="image"), width=10, state="readonly")
             cond_obj_combo.pack(side=tk.LEFT, padx=(0,2)); step_entry["dynamic_param_widgets"]["condition_object_name"] = cond_obj_var
-            create_labeled_entry(frame, "Then#:", "then_step", params.get("then_step",1), width=3)
-            create_labeled_entry(frame, "Else#:", "else_step", params.get("else_step","Next"), width=4)
+            create_labeled_entry(frame, "Then#:", "then_step", 1, width=3)
+            create_labeled_entry(frame, "Else#:", "else_step", "Next", width=4)
             create_labeled_entry(frame, "Conf:", "confidence", params.get("confidence",0.8), width=3)
         elif action == "If Pixel Color":
             ttk.Label(frame, text="If Obj:").pack(side=tk.LEFT, padx=(0,1))
             cond_obj_var = tk.StringVar(value=params.get("condition_object_name", ""))
             cond_obj_combo = ttk.Combobox(frame, textvariable=cond_obj_var, values=self.controller.get_object_names(object_type="pixel"), width=10, state="readonly")
             cond_obj_combo.pack(side=tk.LEFT, padx=(0,2)); step_entry["dynamic_param_widgets"]["condition_object_name"] = cond_obj_var
-            create_labeled_entry(frame, "Then#:", "then_step", params.get("then_step",1), width=3)
-            create_labeled_entry(frame, "Else#:", "else_step", params.get("else_step","Next"), width=4)
+            create_labeled_entry(frame, "Then#:", "then_step", 1, width=3)
+            create_labeled_entry(frame, "Else#:", "else_step", "Next", width=4)
             step_entry["params_button"].pack(side=tk.LEFT, padx=3)
 
         # Always show a small note field at the end
@@ -1725,69 +1728,50 @@ class StepCreatorFrame(BaseFrame):
 class InstructionsFrame(BaseFrame):
     def __init__(self, parent, controller):
         super().__init__(parent, controller)
-        tk.Label(self, text="Instructions", font=("Arial", 16, "bold"), bg=self["bg"]).pack(pady=10)
+        tk.Label(self, text="Instructions", font=("Arial", 16, "bold"), bg=self["bg"], fg="white").pack(pady=10)
         instructions_text = """
 Welcome to the Python Desktop Automation Tool!
 
-**1. Core Concepts:**
-   - **Objects**: References to screen elements (Regions, Images, Pixels). Created in "Object Creation".
-   - **Steps**: Actions performed on Objects or globally. Defined in "Step Creator".
-   - **Sequence**: An ordered list of steps, optionally looped.
+**1. Core Concepts**
+   - **Objects** represent Regions, Images, or Pixels on screen.
+   - **Steps** act on Objects or perform global actions.
+   - **Sequences** are ordered lists of Steps that can loop.
 
-**2. Main Menu:**
-   - **New Sequence**: Clears current work and starts fresh. Prompts to save if unsaved changes.
-   - **Instructions**: Shows this help.
-   - **Object Creation**: Go here to define screen elements your steps will interact with.
-   - **Step Creator**: Go here to build your automation sequence.
-   - **File Operations**:
-     - **Load Sequence**: Loads a previously saved sequence (.json file and associated images).
-     - **Save Sequence As...**: Saves the current sequence to a new project folder.
-   - **Loops**: Set how many times the entire sequence should run (0 for infinite).
-   - **Run Sequence**: Executes the currently defined steps.
+**2. Main Menu**
+   - **New Sequence** clears current work.
+   - **Instructions** shows this help.
+   - **Object Creation** defines screen elements.
+   - **Step Creator** builds the automation sequence.
+   - **File Operations** load or save sequences and assets.
+   - **Loops** set how many times the sequence repeats (0 = infinite).
+   - **Run Sequence** executes the steps.
 
-**3. Object Creation Menu:**
-   - Name all objects uniquely.
-   - **Region Creation**:
-     - Grid Mode: Define X by Y grid, click cells, confirm, name it.
-     - Drag Mode: Click-drag a rectangle on screen, name it.
-     - Pixel Monitor: Click "Pixel Monitor", then "Capture Pixel...", move mouse to target, click. Name it.
-   - **Image Creation**:
-     - Grid/Drag Mode (Capture): Similar to region, but captures as an image file. Images are saved within the project folder when the sequence is saved.
-   - **Created Objects List**: Shows currently defined objects.
+**3. Object Creation Menu**
+   - Unique names for all objects.
+   - **Region/Image Creation** via grid or drag capture.
+   - **Pixel Monitor** captures RGB at a point.
+   - All created objects are listed for quick review.
 
-**4. Step Creator Menu:**
-   - **Header**: Shows "Ord" (Order), "Step#", "Object", "Action", "Parameters".
-   - **Adding Steps**: Click "+ Add Step" from the toolbar.
-   - **Ordering Steps**: Use the "▲" and "▼" buttons to move steps up or down.
-   - **Configuring a Step**:
-     - **Object**: Select a pre-defined object, or "(Global/Control)" for actions not tied to a specific screen element (like Wait, Keyboard, or Logic steps).
-     - **Action**: Select an action. Available actions depend on the selected Object type.
-     - **Parameters**: Simple parameters (e.g., Wait duration, Goto target) appear directly. For complex actions (e.g., Click types, Scroll options, RGB values), an "Edit Params" button will appear.
-     - **Keyboard Actions**:
-       - **Keyboard Input**: For typing a string of text.
-       - **Press Key**: For pressing a single special key (e.g., Enter, F1). Select from the dropdown.
-       - **Hotkey Combo**: For common multi-key combinations (e.g., Ctrl+C). Select from the dropdown.
-   - **Logic Actions**:
-     - **Goto Step**: Unconditionally jumps to the specified Step Number.
-     - **If Image Found**: Checks for an Image Object. Jumps to "Then Step#" if found, or "Else Step#" if not.
-     - **If Pixel Color**: Checks a Pixel Object's color. Jumps to "Then Step#" if it matches, or "Else Step#" if not.
-   - **Deleting Steps**: Click the "X" button on a step row.
-   - **Save Sequence**: Saves the current steps and objects to the loaded project file.
+**4. Step Creator Menu**
+   - Toolbar for adding steps or saving.
+   - **Quick +1s** button inserts delay after a step.
+   - Each step supports optional **notes**.
+   - Actions include **Click**, **Scroll**, **Keyboard Input**, **Press Key**, **Hotkey Combo**, and logic like **Goto**, **If Image Found**, or **If Pixel Color**.
+   - Use the arrows to reorder steps.
 
-**5. Running & Saving:**
-   - Failsafe: Move mouse to top-left screen corner to abort. Ctrl+C in terminal also stops.
-   - An asterisk (*) in the window title indicates unsaved changes.
+**5. Running & Saving**
+   - Move mouse to top-left to abort (failsafe).
+   - Window title shows "*" when sequence is modified.
 
-**Tips:**
-   - Save frequently!
-   - Test parts of your sequence often.
-   - Use descriptive names for objects and sequences.
+**Tips**
+   - Save and test often.
+   - Descriptive names make sequences clearer.
 """
-        text_area = scrolledtext.ScrolledText(self, wrap=tk.WORD, height=20, width=70, font=("Arial", 9))
+        text_area = scrolledtext.ScrolledText(self, wrap=tk.WORD, height=20, width=70, font=("Arial", 9), bg="#222222", fg="white", insertbackground="white")
         text_area.insert(tk.INSERT, instructions_text)
-        text_area.config(state=tk.DISABLED, bg="#F0F0F0", relief=tk.FLAT, borderwidth=0)
+        text_area.config(state=tk.DISABLED, bg="#222222", fg="white", relief=tk.FLAT, borderwidth=0)
         text_area.pack(pady=10, padx=10, fill="both", expand=True)
-        tk.Button(self, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame")).pack(pady=10)
+        tk.Button(self, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame"), bg="#444444", fg="white").pack(pady=10)
 
 
 # --- Parameter Dialogs for Steps ---
