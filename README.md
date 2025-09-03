@@ -3,7 +3,7 @@ Automation Maker 2
 Standalone project for the desktop sequence builder originally from the Useful-tools monorepo.
 
 Features
-- Create reusable Objects: regions, images, pixels
+- Create reusable Objects: regions, images, pointRGB
 - Build step sequences: Click, Wait, Scroll, Keyboard Input, Hotkey Combo
 - Control flow: If Image Found, If Pixel Color, Goto Step
 - Save/load sequences, loop execution

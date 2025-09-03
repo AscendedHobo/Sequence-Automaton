@@ -7,6 +7,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 from PIL import Image, ImageTk, ImageGrab # Pillow for pixel color and image ops
 import platform
 import logging
@@ -206,6 +207,19 @@ class DesktopAutomationApp:
         window_menu.add_command(label="Open Sequence Looper (Window)", command=self.open_sequence_looper_window)
         menu.add_cascade(label="Window", menu=window_menu)
         self.root.config(menu=menu)
+
+    def open_path_in_explorer(self, path):
+        """Open the given path in the native file explorer."""
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            elif platform.system() == "Darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.exception('Failed to open path: %s', e)
 
     def open_object_creation_window(self):
         try:
@@ -613,11 +627,11 @@ class DesktopAutomationApp:
         def confirm(_evt=None):
             try:
                 x, y = latest['x'], latest['y']
-                obj_name = simpledialog.askstring("Name Pixel Object", "Enter a name for this pixel:", parent=win)
+                obj_name = simpledialog.askstring("Name PointRGB Object", "Enter a name for this pixel:", parent=win)
                 if obj_name:
-                    obj_data = {"type": "pixel", "coords": (int(x), int(y)), "rgb": latest['rgb']}
+                    obj_data = {"type": "pointRGB", "coords": (int(x), int(y)), "rgb": latest['rgb']}
                     if self.add_object(obj_name, obj_data):
-                        simpledialog.messagebox.showinfo("Pixel Captured", f"Pixel '{obj_name}' at ({x},{y}) RGB={latest['rgb']}", parent=win)
+                        simpledialog.messagebox.showinfo("PointRGB Captured", f"Point '{obj_name}' at ({x},{y}) RGB={latest['rgb']}", parent=win)
             finally:
                 stop()
 
@@ -637,11 +651,11 @@ class DesktopAutomationApp:
         try:
             x, y = pyautogui.position()
             rgb = pyautogui.pixel(x, y)
-            obj_name = simpledialog.askstring("Name Pixel Object", "Enter a name for this pixel object:", parent=self.root)
+            obj_name = simpledialog.askstring("Name PointRGB Object", "Enter a name for this pixel object:", parent=self.root)
             if obj_name:
-                obj_data = {"type": "pixel", "coords": (x, y), "rgb": rgb}
+                obj_data = {"type": "pointRGB", "coords": (x, y), "rgb": rgb}
                 if self.add_object(obj_name, obj_data):
-                    simpledialog.messagebox.showinfo("Pixel Captured", f"Pixel '{obj_name}' captured at ({x},{y}) with RGB: {rgb}", parent=self.root)
+                    simpledialog.messagebox.showinfo("PointRGB Captured", f"Point '{obj_name}' captured at ({x},{y}) with RGB: {rgb}", parent=self.root)
         except Exception as e:
             simpledialog.messagebox.showerror("Error", f"Could not capture pixel: {e}", parent=self.root)
         finally:
@@ -674,6 +688,7 @@ class DesktopAutomationApp:
         self.grid_canvas.bind("<Button-4>", lambda e: self._on_grid_scroll(delta=120))
         self.grid_canvas.bind("<Button-5>", lambda e: self._on_grid_scroll(delta=-120))
         self.grid_window.bind("<Escape>", lambda e: self._confirm_grid_selection(cancelled=True, creation_type=creation_type))
+        self.grid_window.bind("<Return>", lambda e: self._confirm_grid_selection(creation_type=creation_type) if self.selected_grid_cells else None)
         confirm_bar = tk.Frame(self.grid_canvas, bg="lightgray", relief=tk.RAISED, borderwidth=1)
         self.grid_confirm_label = tk.Label(confirm_bar, text=f"{rows}x{cols} Grid. Scroll to change. ESC to cancel.", bg="lightgray")
         self.grid_confirm_label.pack(side=tk.LEFT, padx=10)
@@ -763,7 +778,7 @@ class DesktopAutomationApp:
                         canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2, outline='blue', fill='blue', width=1)
                 else:
                     self.show_toast('Region object missing coords')
-            elif t == 'pixel':
+            elif t == 'pointRGB':
                 coords = obj.get('coords')
                 if coords and len(coords) >= 2:
                     px, py = coords[0], coords[1]
@@ -1063,16 +1078,16 @@ class DesktopAutomationApp:
                             expected_rgb_param = params.get("expected_rgb")
                             expected_rgb = tuple(expected_rgb_param) if isinstance(expected_rgb_param, list) else (expected_rgb_param if isinstance(expected_rgb_param, tuple) else (condition_object.get("rgb") if condition_object else None))
                             then_step = params.get("then_step"); else_step = params.get("else_step")
-                            if condition_object and condition_object.get("type") == "pixel" and expected_rgb:
+                            if condition_object and condition_object.get("type") == "pointRGB" and expected_rgb:
                                 px, py = condition_object["coords"]
                                 current_rgb = pyautogui.pixel(px,py)
                                 if current_rgb == expected_rgb:
-                                    print(f"    IF: Pixel '{condition_obj_name}' color MATCHED.")
+                                    print(f"    IF: Point '{condition_obj_name}' color MATCHED.")
                                     if isinstance(then_step, int) and 1 <= then_step <= len(self.current_steps):
                                         jump_to_pc = then_step - 1
                                     elif then_step is not None: print(f"    WARN: Invalid 'Then' step for If Pixel Color: {then_step}.")
                                 else: # Pixel color NOT matched
-                                    print(f"    IF: Pixel '{condition_obj_name}' color ({current_rgb}) did NOT match {expected_rgb}.")
+                                    print(f"    IF: Point '{condition_obj_name}' color ({current_rgb}) did NOT match {expected_rgb}.")
                                     if isinstance(else_step, int) and 1 <= else_step <= len(self.current_steps):
                                         jump_to_pc = else_step - 1
                                     elif else_step is not None: print(f"    WARN: Invalid 'Else' step for If Pixel Color: {else_step}.")
@@ -1087,7 +1102,7 @@ class DesktopAutomationApp:
                                     interval_s = params.get("interval", 0.1 if num_clicks > 1 else 0.0)
                                     click_x, click_y = None, None
                                     if obj_type == "region" and obj_coords: click_x, click_y = obj_coords[0]+obj_coords[2]/2, obj_coords[1]+obj_coords[3]/2
-                                    elif obj_type == "pixel" and obj_coords: click_x, click_y = obj_coords[0], obj_coords[1]
+                                    elif obj_type == "pointRGB" and obj_coords: click_x, click_y = obj_coords[0], obj_coords[1]
                                     elif obj_type == "image" and image_path_to_use:
                                         loc = pyautogui.locateCenterOnScreen(image_path_to_use, confidence=params.get("confidence", target_object.get("confidence",0.8)))
                                         if loc: click_x, click_y = loc
@@ -1102,17 +1117,17 @@ class DesktopAutomationApp:
                                             print(f"    Image '{obj_name}' found."); found = True; break
                                         time.sleep(0.25) 
                                     if not found: print(f"    TIMEOUT: Image '{obj_name}' not found after {timeout}s.")
-                                elif action == "Wait for Pixel Color" and obj_type == "pixel":
+                                elif action == "Wait for Pixel Color" and obj_type == "pointRGB":
                                     expected_rgb_wfp = params.get("expected_rgb")
                                     expected_rgb_wfp = tuple(expected_rgb_wfp) if isinstance(expected_rgb_wfp, list) else (expected_rgb_wfp if isinstance(expected_rgb_wfp, tuple) else target_object.get("rgb"))
-                                    if not expected_rgb_wfp: print(f"    ERROR: No RGB for pixel '{obj_name}'.")
+                                    if not expected_rgb_wfp: print(f"    ERROR: No RGB for point '{obj_name}'.")
                                     else:
                                         timeout = params.get("timeout_s",10); start_time=time.time(); found_color=False
                                         while time.time()-start_time < timeout:
                                             current_rgb = pyautogui.pixel(obj_coords[0],obj_coords[1])
-                                            if current_rgb == expected_rgb_wfp: print(f"    Pixel color matched."); found_color=True; break
+                                            if current_rgb == expected_rgb_wfp: print(f"    Point color matched."); found_color=True; break
                                             time.sleep(0.25)
-                                        if not found_color: print(f"    TIMEOUT: Pixel color not matched. Last: {current_rgb}")
+                                        if not found_color: print(f"    TIMEOUT: Point color not matched. Last: {current_rgb}")
                             # Global actions
                             if action == "Wait":
                                 duration = params.get("duration_s", 1.0); min_dur = params.get("min_s"); max_dur = params.get("max_s")
@@ -1218,23 +1233,36 @@ class ObjectCreationFrame(BaseFrame):
     def __init__(self, parent, controller):
         super().__init__(parent, controller)
         self.current_creation_type = "region"
-        ttk.Label(self, text="Object Creation", font=("Arial", 16, "bold")).pack(pady=10)
-        region_frame = ttk.Labelframe(self, text="Region Creation", padding=10); region_frame.pack(pady=5,padx=10,fill="x")
-        grid_dim_frame = ttk.Frame(region_frame); grid_dim_frame.pack(fill="x")
+
+        header = ttk.Frame(self)
+        header.pack(fill="x")
+        ttk.Label(header, text="Object Creation", font=("Arial", 16, "bold")).pack(side=tk.LEFT, pady=10, padx=5)
+        ttk.Button(header, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame")).pack(side=tk.RIGHT, pady=10, padx=5)
+
+        region_frame = ttk.Labelframe(self, text="Region Creation", padding=10)
+        region_frame.pack(pady=5, padx=10, fill="x")
+        ttk.Button(region_frame, text="Drag Mode", command=lambda:self.set_creation_type_and_run("region",controller.create_region_drag_mode)).pack(pady=3,fill="x")
+        ttk.Button(region_frame, text="Point (Mouse Pos)", command=lambda: self.create_point_region_from_mouse()).pack(pady=3,fill="x")
+        ttk.Button(region_frame, text="Pixel Monitor", command=controller._start_pixel_monitor_listener).pack(pady=3,fill="x")
+        grid_dim_frame = ttk.Frame(region_frame)
+        grid_dim_frame.pack(fill="x", pady=(5,0))
         ttk.Label(grid_dim_frame, text="Grid (W x H):").pack(side=tk.LEFT,padx=(0,2))
         ttk.Entry(grid_dim_frame, textvariable=controller.grid_cols_var, width=4).pack(side=tk.LEFT)
         ttk.Label(grid_dim_frame, text="x").pack(side=tk.LEFT,padx=1)
         ttk.Entry(grid_dim_frame, textvariable=controller.grid_rows_var, width=4).pack(side=tk.LEFT,padx=(0,5))
         ttk.Button(grid_dim_frame, text="Grid Mode", command=lambda:self.set_creation_type_and_run("region",controller.create_region_grid_mode)).pack(side=tk.LEFT,expand=True,fill="x")
-        ttk.Button(region_frame, text="Drag Mode", command=lambda:self.set_creation_type_and_run("region",controller.create_region_drag_mode)).pack(pady=3,fill="x")
-        ttk.Button(region_frame, text="Point (Mouse Pos)", command=lambda: self.create_point_region_from_mouse()).pack(pady=3,fill="x")
-        ttk.Button(region_frame, text="Pixel Monitor", command=controller._start_pixel_monitor_listener).pack(pady=3,fill="x")
-        image_frame = ttk.Labelframe(self, text="Image Creation", padding=10); image_frame.pack(pady=5,padx=10,fill="x")
-        ttk.Button(image_frame, text="Grid Mode (Capture)", command=lambda:self.set_creation_type_and_run("image",controller.create_region_grid_mode)).pack(pady=3,fill="x")
+
+        image_frame = ttk.Labelframe(self, text="Image Creation", padding=10)
+        image_frame.pack(pady=5,padx=10,fill="x")
         ttk.Button(image_frame, text="Drag Mode (Capture)", command=lambda:self.set_creation_type_and_run("image",controller.create_region_drag_mode)).pack(pady=3,fill="x")
-        sound_frame = ttk.Labelframe(self, text="Sound Creation (Future)", padding=10); sound_frame.pack(pady=5,padx=10,fill="x")
+        ttk.Button(image_frame, text="Grid Mode (Capture)", command=lambda:self.set_creation_type_and_run("image",controller.create_region_grid_mode)).pack(pady=3,fill="x")
+
+        sound_frame = ttk.Labelframe(self, text="Sound Creation (Future)", padding=10)
+        sound_frame.pack(pady=5,padx=10,fill="x")
         ttk.Button(sound_frame, text="Sound Recording", state=tk.DISABLED).pack(pady=3,fill="x")
-        self.objects_list_frame=ttk.Labelframe(self, text="Created Objects", padding=10); self.objects_list_frame.pack(pady=5,padx=10,fill="both",expand=True)
+
+        self.objects_list_frame=ttk.Labelframe(self, text="Created Objects", padding=10)
+        self.objects_list_frame.pack(pady=5,padx=10,fill="both",expand=True)
         cols = ("Name", "Type", "Details")
         self.objects_tree = ttk.Treeview(self.objects_list_frame, columns=cols, show='headings', height=8)
         for c in cols:
@@ -1244,10 +1272,10 @@ class ObjectCreationFrame(BaseFrame):
         self.objects_tree.column("Details", width=420)
         self.objects_tree.pack(fill="both", expand=True)
         self.objects_tree.bind('<Double-1>', self._on_object_double_click)
+        self.objects_tree.bind('<Button-3>', self._on_tree_right_click)
         btn_bar = ttk.Frame(self.objects_list_frame)
         btn_bar.pack(fill='x', pady=4)
         ttk.Button(btn_bar, text='Delete Selected', command=self._delete_selected_object).pack(side=tk.RIGHT)
-        ttk.Button(self, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame")).pack(pady=10, side=tk.BOTTOM)
     def set_creation_type_and_run(self, c_type, func_to_run):
         self.current_creation_type = c_type
         try:
@@ -1313,9 +1341,9 @@ class ObjectCreationFrame(BaseFrame):
                     details=f"Coords: {data.get('coords')}"
                 if obj_type=="image" and data.get('image_path'):
                     details+=f", Path: {os.path.basename(data['image_path'])}"
-                elif obj_type=="pixel":
+                elif obj_type=="pointRGB":
                     details=f"Coords: {data.get('coords')}, RGB: {data.get('rgb')}"
-                    display_type = "point"
+                    display_type = "pointRGB"
                 if data.get('mode') == 'point' and obj_type == 'region':
                     display_type = "point"
                 self.objects_tree.insert('', 'end', values=(name, display_type, details))
@@ -1359,6 +1387,33 @@ class ObjectCreationFrame(BaseFrame):
             if hasattr(self.controller,'logger'):
                 self.controller.logger.exception('object overlay failed')
 
+    def _on_tree_right_click(self, event):
+        try:
+            iid = self.objects_tree.identify_row(event.y)
+            if iid:
+                self.objects_tree.selection_set(iid)
+                obj_name = self.objects_tree.item(iid, 'values')[0]
+            else:
+                obj_name = None
+            menu = tk.Menu(self, tearoff=0)
+            if obj_name:
+                obj = self.controller.objects.get(obj_name)
+                if obj and obj.get('type') == 'image':
+                    img_path = obj.get('image_path')
+                    if img_path and os.path.exists(img_path):
+                        menu.add_command(label='Open Image Location', command=lambda p=img_path: self.controller.open_path_in_explorer(os.path.dirname(p)))
+            if self.controller.current_project_path:
+                images_dir = os.path.join(self.controller.current_project_path, 'images')
+                if os.path.exists(images_dir):
+                    menu.add_command(label='Open Images Folder', command=lambda p=images_dir: self.controller.open_path_in_explorer(p))
+            if menu.index('end') is not None:
+                menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
 
 class StepCreatorFrame(BaseFrame):
     def _type_abbrev(self, obj):
@@ -1367,7 +1422,9 @@ class StepCreatorFrame(BaseFrame):
         t = obj.get("type")
         if t == "image":
             return "img"
-        if t == "pixel" or obj.get("mode") == "point":
+        if t == "pointRGB":
+            return "pRGB"
+        if obj.get("mode") == "point":
             return "point"
         if t == "region":
             return "reg"
@@ -1395,7 +1452,7 @@ class StepCreatorFrame(BaseFrame):
         return display
     ACTION_CONFIG = {
         "region": ["Click", "Type into Region (Future)"],
-        "pixel": ["Click", "Wait for Pixel Color"],
+        "pointRGB": ["Click", "Wait for Pixel Color"],
         "image": ["Click", "Wait for Image"],
         "_global_": ["Wait", "Keyboard Input", "Press Key", "Hotkey Combo", "Scroll"],
         "_control_": ["If Image Found", "If Pixel Color", "Goto Step"]
@@ -1685,7 +1742,7 @@ class StepCreatorFrame(BaseFrame):
             create_labeled_entry(frame, "Conf:", "confidence", params.get("confidence",0.8), width=3)
         elif action == "If Pixel Color":
             ttk.Label(frame, text="If Obj:").pack(side=tk.LEFT, padx=(0,1))
-            cond_names = self.controller.get_object_names(object_type="pixel")
+            cond_names = self.controller.get_object_names(object_type="pointRGB")
             default_cond = params.get("condition_object_name", "")
             if default_cond and default_cond not in cond_names:
                 cond_names.append(default_cond)
@@ -1801,12 +1858,15 @@ class StepCreatorFrame(BaseFrame):
 class InstructionsFrame(BaseFrame):
     def __init__(self, parent, controller):
         super().__init__(parent, controller)
-        tk.Label(self, text="Instructions", font=("Arial", 16, "bold"), bg=self["bg"], fg="white").pack(pady=10)
+        header = ttk.Frame(self)
+        header.pack(fill="x")
+        tk.Label(header, text="Instructions", font=("Arial", 16, "bold"), bg=self["bg"], fg="white").pack(side=tk.LEFT, pady=10, padx=5)
+        tk.Button(header, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame"), bg="#444444", fg="white").pack(side=tk.RIGHT, pady=10, padx=5)
         instructions_text = """
 Welcome to the Python Desktop Automation Tool!
 
 **1. Core Concepts**
-   - **Objects** represent Regions, Images, or Pixels on screen.
+   - **Objects** represent Regions, Images, or PointRGB points on screen.
    - **Steps** act on Objects or perform global actions.
    - **Sequences** are ordered lists of Steps that can loop.
 
@@ -1822,7 +1882,7 @@ Welcome to the Python Desktop Automation Tool!
 **3. Object Creation Menu**
    - Unique names for all objects.
    - **Region/Image Creation** via grid or drag capture.
-   - **Pixel Monitor** captures RGB at a point.
+   - **Pixel Monitor** captures RGB at a point (pointRGB).
    - All created objects are listed for quick review.
 
 **4. Step Creator Menu**
@@ -1844,7 +1904,6 @@ Welcome to the Python Desktop Automation Tool!
         text_area.insert(tk.INSERT, instructions_text)
         text_area.config(state=tk.DISABLED, bg="#222222", fg="white", relief=tk.FLAT, borderwidth=0)
         text_area.pack(pady=10, padx=10, fill="both", expand=True)
-        tk.Button(self, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame"), bg="#444444", fg="white").pack(pady=10)
 
 
 # --- Parameter Dialogs for Steps ---
