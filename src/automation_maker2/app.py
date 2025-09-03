@@ -236,6 +236,13 @@ class DesktopAutomationApp:
         try:
             win = tk.Toplevel(self.root)
             win.title("Step Creator")
+            try:
+                win.state('zoomed')
+            except Exception:
+                try:
+                    win.attributes('-zoomed', True)
+                except Exception:
+                    pass
             frame = StepCreatorFrame(parent=win, controller=self)
             frame.pack(fill="both", expand=True)
             try:
@@ -642,7 +649,9 @@ class DesktopAutomationApp:
             if self.pixel_capture_instruction_window and self.pixel_capture_instruction_window.winfo_exists():
                 self.pixel_capture_instruction_window.destroy()
 
-    def create_region_grid_mode(self):
+    def create_region_grid_mode(self, creation_type=None):
+        if creation_type is None:
+            creation_type = self.frames["ObjectCreationFrame"].current_creation_type
         if self.grid_window and self.grid_window.winfo_exists(): self.grid_window.destroy()
         self.grid_window = tk.Toplevel(self.root)
         self.grid_window.attributes('-fullscreen', True); self.grid_window.attributes('-alpha', 0.4); self.grid_window.attributes('-topmost', True)
@@ -664,11 +673,11 @@ class DesktopAutomationApp:
         # Linux X11 scroll events
         self.grid_canvas.bind("<Button-4>", lambda e: self._on_grid_scroll(delta=120))
         self.grid_canvas.bind("<Button-5>", lambda e: self._on_grid_scroll(delta=-120))
-        self.grid_window.bind("<Escape>", lambda e: self._confirm_grid_selection(cancelled=True))
+        self.grid_window.bind("<Escape>", lambda e: self._confirm_grid_selection(cancelled=True, creation_type=creation_type))
         confirm_bar = tk.Frame(self.grid_canvas, bg="lightgray", relief=tk.RAISED, borderwidth=1)
         self.grid_confirm_label = tk.Label(confirm_bar, text=f"{rows}x{cols} Grid. Scroll to change. ESC to cancel.", bg="lightgray")
         self.grid_confirm_label.pack(side=tk.LEFT, padx=10)
-        tk.Button(confirm_bar, text="Confirm Selection", command=self._confirm_grid_selection).pack(side=tk.LEFT, padx=10)
+        tk.Button(confirm_bar, text="Confirm Selection", command=lambda: self._confirm_grid_selection(creation_type=creation_type)).pack(side=tk.LEFT, padx=10)
         self.grid_canvas.create_window(self.screen_width // 2, 30, window=confirm_bar, anchor="n")
         self.grid_window.focus_force()
 
@@ -810,7 +819,7 @@ class DesktopAutomationApp:
         else: self.selected_grid_cells.append(cell)
         self._draw_grid_on_canvas()
 
-    def _confirm_grid_selection(self, cancelled=False):
+    def _confirm_grid_selection(self, cancelled=False, creation_type=None):
         if cancelled or not self.selected_grid_cells:
             if self.grid_window and self.grid_window.winfo_exists(): self.grid_window.destroy()
             self.selected_grid_cells = []
@@ -821,7 +830,8 @@ class DesktopAutomationApp:
         x1,y1 = min_c*self.cell_width, min_r*self.cell_height
         width,height = (max_c-min_c+1)*self.cell_width, (max_r-min_r+1)*self.cell_height
         coords = (int(x1),int(y1),int(width),int(height))
-        creation_type = self.frames["ObjectCreationFrame"].current_creation_type
+        if creation_type is None:
+            creation_type = self.frames["ObjectCreationFrame"].current_creation_type
         obj_name = simpledialog.askstring(f"Name {creation_type.capitalize()} Object", f"Enter name for selected {creation_type}:", parent=self.root)
         if obj_name:
             if creation_type == "region":
@@ -843,7 +853,9 @@ class DesktopAutomationApp:
                 except Exception as e: self.root.deiconify(); simpledialog.messagebox.showerror("Error",f"Capture image error: {e}",parent=self.root)
         if self.grid_window and self.grid_window.winfo_exists(): self.grid_window.destroy(); self.selected_grid_cells = []
 
-    def create_region_drag_mode(self):
+    def create_region_drag_mode(self, creation_type=None):
+        if creation_type is None:
+            creation_type = self.frames["ObjectCreationFrame"].current_creation_type
         if self.drag_select_window and self.drag_select_window.winfo_exists(): return
         self.drag_select_window = tk.Toplevel(self.root)
         self.drag_select_window.attributes('-fullscreen',True); self.drag_select_window.attributes('-alpha',0.3); self.drag_select_window.attributes('-topmost',True)
@@ -858,7 +870,6 @@ class DesktopAutomationApp:
             self.drag_select_window.destroy(); self.drag_select_window=None; self.drag_start_x,self.drag_start_y,self.drag_rect_id = None,None,None
             if abs(x1-x2)<5 or abs(y1-y2)<5: simpledialog.messagebox.showinfo("Info","Selection too small.",parent=self.root); return
             coords=(int(x1),int(y1),int(x2-x1),int(y2-y1))
-            creation_type = self.frames["ObjectCreationFrame"].current_creation_type
             obj_name = simpledialog.askstring(f"Name {creation_type.capitalize()} Object",f"Enter name:",parent=self.root)
             if obj_name:
                 if creation_type == "region":
@@ -1237,7 +1248,12 @@ class ObjectCreationFrame(BaseFrame):
         btn_bar.pack(fill='x', pady=4)
         ttk.Button(btn_bar, text='Delete Selected', command=self._delete_selected_object).pack(side=tk.RIGHT)
         ttk.Button(self, text="Back to Main Menu", command=lambda: controller.show_frame("MainFrame")).pack(pady=10, side=tk.BOTTOM)
-    def set_creation_type_and_run(self,c_type,func_to_run): self.current_creation_type=c_type; func_to_run()
+    def set_creation_type_and_run(self, c_type, func_to_run):
+        self.current_creation_type = c_type
+        try:
+            func_to_run(c_type)
+        except TypeError:
+            func_to_run()
     def create_point_region_from_mouse(self):
         # Popup with live coords; Enter to confirm, Esc to cancel
         pop = tk.Toplevel(self.controller.root)
@@ -1292,13 +1308,17 @@ class ObjectCreationFrame(BaseFrame):
                 self.objects_tree.delete(i)
             for name,data in self.controller.objects.items():
                 obj_type=data.get("type","N/A"); details=""
+                display_type = obj_type
                 if obj_type in ("region","image") and data.get('coords'):
                     details=f"Coords: {data.get('coords')}"
                 if obj_type=="image" and data.get('image_path'):
                     details+=f", Path: {os.path.basename(data['image_path'])}"
                 elif obj_type=="pixel":
                     details=f"Coords: {data.get('coords')}, RGB: {data.get('rgb')}"
-                self.objects_tree.insert('', 'end', values=(name, obj_type, details))
+                    display_type = "point"
+                if data.get('mode') == 'point' and obj_type == 'region':
+                    display_type = "point"
+                self.objects_tree.insert('', 'end', values=(name, display_type, details))
         except Exception as e:
             if hasattr(self.controller,'logger'):
                 self.controller.logger.exception('update_objects_display failed')
@@ -1341,8 +1361,17 @@ class ObjectCreationFrame(BaseFrame):
 
 
 class StepCreatorFrame(BaseFrame):
-    def _type_abbrev(self, t):
-        return {"image": "img", "pixel": "RGB", "region": "reg"}.get(t or "", "-")
+    def _type_abbrev(self, obj):
+        if not obj:
+            return "-"
+        t = obj.get("type")
+        if t == "image":
+            return "img"
+        if t == "pixel" or obj.get("mode") == "point":
+            return "point"
+        if t == "region":
+            return "reg"
+        return "-"
 
     def _display_name_for_object(self, name):
         if not name:
@@ -1350,8 +1379,8 @@ class StepCreatorFrame(BaseFrame):
         obj = self.controller.objects.get(name)
         if not obj:
             return name
-        ab = self._type_abbrev(obj.get("type"))
-        return f"{name} ({ab})"
+        ab = self._type_abbrev(obj)
+        return f"{name} [ {ab} ]"
 
     def _get_object_display_names(self):
         names = [self._display_name_for_object(n) for n in self.controller.get_object_names()]
@@ -1361,9 +1390,8 @@ class StepCreatorFrame(BaseFrame):
     def _name_from_display(self, display):
         if display == "(Global/Control)":
             return None
-        # Expect "Name (abbrev)"; split from right
-        if display.endswith(")") and " (" in display:
-            return display.rsplit(" (", 1)[0]
+        if display.endswith(" ]") and " [ " in display:
+            return display.rsplit(" [ ", 1)[0]
         return display
     ACTION_CONFIG = {
         "region": ["Click", "Type into Region (Future)"],
@@ -1577,9 +1605,8 @@ class StepCreatorFrame(BaseFrame):
                 obj_type = obj_data.get("type")
                 obj_specific_actions = self.ACTION_CONFIG.get(obj_type, [])
                 current_actions = obj_specific_actions + [ga for ga in self.ACTION_CONFIG["_global_"] if ga not in obj_specific_actions]
-                # Update type label if present
                 if step_entry.get("obj_type_label") is not None:
-                    step_entry["obj_type_label"].config(text=self._type_abbrev(obj_type))
+                    step_entry["obj_type_label"].config(text=self._type_abbrev(obj_data))
         
         action_dropdown['values'] = sorted(list(set(current_actions)))
         
