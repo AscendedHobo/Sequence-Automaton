@@ -130,12 +130,15 @@ class DesktopAutomationApp:
         self.frames = {}
         # Track any extra ObjectCreationFrame instances opened in new windows
         self._aux_object_frames = []
+        # Track whether we've already maximized Step Creator once
+        self._step_creator_maximized_once = False
         for F in (MainFrame, ObjectCreationFrame, StepCreatorFrame, InstructionsFrame):
             page_name = F.__name__
             frame = F(parent=self.container, controller=self)
             self.frames[page_name] = frame
             frame.grid(row=0, column=0, sticky="nsew")
 
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.show_frame("MainFrame")
 
     def _refresh_all_object_views(self):
@@ -239,6 +242,10 @@ class DesktopAutomationApp:
                 frame.clear_and_rebuild_steps(self.current_steps)
             except Exception:
                 pass
+            def _close():
+                if self._check_unsaved_changes():
+                    win.destroy()
+            win.protocol("WM_DELETE_WINDOW", _close)
             win.lift(); win.focus_force()
         except Exception as e:
             code = str(uuid.uuid4())[:8]
@@ -486,6 +493,15 @@ class DesktopAutomationApp:
         frame.tkraise()
         if hasattr(frame, 'refresh_content') and callable(getattr(frame, 'refresh_content')):
             frame.refresh_content()
+        if page_name == "StepCreatorFrame" and not self._step_creator_maximized_once:
+            try:
+                self.root.state('zoomed')
+            except Exception:
+                try:
+                    self.root.attributes('-zoomed', True)
+                except Exception:
+                    pass
+            self._step_creator_maximized_once = True
 
         title_base = page_name
         if self.sequence_modified:
@@ -511,9 +527,10 @@ class DesktopAutomationApp:
         self.objects[name] = obj_data
         print(f"Added object: {name} - {obj_data}")
         if self.frames["ObjectCreationFrame"].winfo_exists():
-             self.frames["ObjectCreationFrame"].update_objects_display()
+            self.frames["ObjectCreationFrame"].update_objects_display()
+        self._refresh_all_object_views()
         if self.frames["StepCreatorFrame"].winfo_exists():
-             self.frames["StepCreatorFrame"].refresh_object_dropdowns()
+            self.frames["StepCreatorFrame"].refresh_object_dropdowns()
         self.mark_sequence_modified()
         return True
 
@@ -534,8 +551,11 @@ class DesktopAutomationApp:
         win.resizable(False, False)
         info = ttk.Label(win, text="Move mouse over pixel. Press Enter to confirm, Esc to cancel.")
         info.pack(padx=10, pady=(10, 4))
-        lbl = ttk.Label(win, text="x=0, y=0 | RGB=(0,0,0) | color=black")
-        lbl.pack(padx=10, pady=(0, 10))
+        lbl = ttk.Label(win, text="x=0, y=0 | RGB=(0,0,0)")
+        lbl.pack(padx=10, pady=(0,4))
+        color_canvas = tk.Canvas(win, width=40, height=40, highlightthickness=1, highlightbackground='black')
+        color_canvas.pack(pady=(0,10))
+        color_rect = color_canvas.create_rectangle(0, 0, 40, 40, fill="#000000", outline="#000000")
 
         stop_evt = threading.Event()
         latest = {'x': 0, 'y': 0, 'rgb': (0, 0, 0)}
@@ -579,7 +599,8 @@ class DesktopAutomationApp:
             if not win.winfo_exists():
                 return
             x, y, (r, g, b) = latest['x'], latest['y'], latest['rgb']
-            lbl.config(text=f"x={x}, y={y} | RGB=({r},{g},{b}) | color={approx_color_name(r,g,b)}")
+            lbl.config(text=f"x={x}, y={y} | RGB=({r},{g},{b})")
+            color_canvas.itemconfig(color_rect, fill=f"#{r:02x}{g:02x}{b:02x}", outline=f"#{r:02x}{g:02x}{b:02x}")
             win.after(16, ui_update)
 
         def confirm(_evt=None):
@@ -675,8 +696,13 @@ class DesktopAutomationApp:
 
             def close(_e=None):
                 if ov and ov.winfo_exists():
+                    try:
+                        self.root.unbind_all('<Escape>')
+                    except Exception:
+                        pass
                     ov.destroy()
             ov.bind('<Escape>', close)
+            self.root.bind_all('<Escape>', close)
 
             t = obj.get('type')
             if t == 'image':
@@ -866,6 +892,10 @@ class DesktopAutomationApp:
             elif response is False: return True
             else: return False
         return True
+
+    def _on_close(self):
+        if self._check_unsaved_changes():
+            self.root.destroy()
 
     def new_sequence(self):
         if not self._check_unsaved_changes(): return
@@ -1353,7 +1383,7 @@ class StepCreatorFrame(BaseFrame):
         toolbar_frame.pack(fill="x", padx=12, pady=(0,6))
         ttk.Button(toolbar_frame, text="+ Add Step", command=self.add_step_row).pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar_frame, text="Save Sequence", command=self.controller.save_sequence).pack(side=tk.LEFT, padx=4)
-        ttk.Button(toolbar_frame, text="Back to Main Menu", command=lambda: self.controller.show_frame("MainFrame")).pack(side=tk.RIGHT)
+        ttk.Button(toolbar_frame, text="Back to Main Menu", command=self._back_to_main).pack(side=tk.RIGHT)
 
         header_frame = ttk.Frame(self)
         header_frame.pack(fill="x", padx=12, pady=(0,2))
@@ -1391,6 +1421,10 @@ class StepCreatorFrame(BaseFrame):
 
     def _on_mousewheel(self, event):
         self.canvas_steps.yview_scroll(int(-1*(event.delta/120)), "units")
+
+    def _back_to_main(self):
+        if self.controller._check_unsaved_changes():
+            self.controller.show_frame("MainFrame")
 
     def add_delay_between_rows(self, seconds=1.0):
         # Insert a delay after each non-delay row
@@ -1462,7 +1496,7 @@ class StepCreatorFrame(BaseFrame):
         else:
             obj_var.set("(Global/Control)")
             if mark_modified and insert_at_index is None:
-                 self.controller.mark_sequence_modified()
+                self.controller.mark_sequence_modified()
 
         self._renumber_and_reorder_visuals()
 
@@ -1577,10 +1611,14 @@ class StepCreatorFrame(BaseFrame):
 
         def create_labeled_combobox(parent, label_text, param_key, values_list, default_value="", width=10):
             ttk.Label(parent, text=label_text).pack(side=tk.LEFT, padx=(0,1))
-            var = tk.StringVar(value=str(params.get(param_key, default_value)))
-            if default_value not in values_list and values_list: var.set(values_list[0])
-            elif not values_list: var.set("")
-            combo = ttk.Combobox(parent, textvariable=var, values=values_list, width=width, state="readonly")
+            val = params.get(param_key, default_value)
+            if val is None:
+                val = ""
+            vals = list(values_list)
+            if val and val not in vals:
+                vals.append(val)
+            var = tk.StringVar(value=str(val) if vals else "")
+            combo = ttk.Combobox(parent, textvariable=var, values=vals, width=width, state="readonly")
             combo.pack(side=tk.LEFT, padx=(0,3)); step_entry["dynamic_param_widgets"][param_key] = var
             return var
 
@@ -1608,16 +1646,24 @@ class StepCreatorFrame(BaseFrame):
             create_labeled_entry(frame, "Target Step#:", "target_step", 1, width=4)
         elif action == "If Image Found":
             ttk.Label(frame, text="If Obj:").pack(side=tk.LEFT, padx=(0,1))
-            cond_obj_var = tk.StringVar(value=params.get("condition_object_name", ""))
-            cond_obj_combo = ttk.Combobox(frame, textvariable=cond_obj_var, values=self.controller.get_object_names(object_type="image"), width=10, state="readonly")
+            cond_names = self.controller.get_object_names(object_type="image")
+            default_cond = params.get("condition_object_name", "")
+            if default_cond and default_cond not in cond_names:
+                cond_names.append(default_cond)
+            cond_obj_var = tk.StringVar(value=default_cond)
+            cond_obj_combo = ttk.Combobox(frame, textvariable=cond_obj_var, values=cond_names, width=10, state="readonly")
             cond_obj_combo.pack(side=tk.LEFT, padx=(0,2)); step_entry["dynamic_param_widgets"]["condition_object_name"] = cond_obj_var
             create_labeled_entry(frame, "Then#:", "then_step", 1, width=3)
             create_labeled_entry(frame, "Else#:", "else_step", "Next", width=4)
             create_labeled_entry(frame, "Conf:", "confidence", params.get("confidence",0.8), width=3)
         elif action == "If Pixel Color":
             ttk.Label(frame, text="If Obj:").pack(side=tk.LEFT, padx=(0,1))
-            cond_obj_var = tk.StringVar(value=params.get("condition_object_name", ""))
-            cond_obj_combo = ttk.Combobox(frame, textvariable=cond_obj_var, values=self.controller.get_object_names(object_type="pixel"), width=10, state="readonly")
+            cond_names = self.controller.get_object_names(object_type="pixel")
+            default_cond = params.get("condition_object_name", "")
+            if default_cond and default_cond not in cond_names:
+                cond_names.append(default_cond)
+            cond_obj_var = tk.StringVar(value=default_cond)
+            cond_obj_combo = ttk.Combobox(frame, textvariable=cond_obj_var, values=cond_names, width=10, state="readonly")
             cond_obj_combo.pack(side=tk.LEFT, padx=(0,2)); step_entry["dynamic_param_widgets"]["condition_object_name"] = cond_obj_var
             create_labeled_entry(frame, "Then#:", "then_step", 1, width=3)
             create_labeled_entry(frame, "Else#:", "else_step", "Next", width=4)
