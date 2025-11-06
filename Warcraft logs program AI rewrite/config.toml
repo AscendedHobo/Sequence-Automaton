@@ -1,0 +1,17 @@
+[paths]
+log_output_dir = "logs"
+map_directory = "maps"
+
+[processing]
+interpolation_interval = 0.8
+max_death_threshold = 5
+
+[visualization]
+default_plot = "scatter"
+colormap = "magma"
+hexbin_grid_size = 40
+kde_bandwidth = 1.2
+
+[ui]
+window_title = "WoW Raid Analysis"
+recent_files_limit = 10
